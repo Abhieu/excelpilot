@@ -5,7 +5,7 @@
 > established by running a command; everything else is a plan, not a result.
 
 - **Project:** ExcelPilot — AI Excel Operations Engine
-- **Status:** Phase 7 — CLI (in progress)
+- **Status:** Phase 8 — Benchmarks (in progress)
 - **Last updated:** 2026-09-25
 
 ---
@@ -192,8 +192,8 @@ Forbidden and tested-for:
 | 4 | Operations + executor | COMPLETE | 55 executor tests. `pytest tests/test_executor.py` |
 | 5 | Planner, JEV adapter, policy | COMPLETE | 36 policy + 47 planner + 46 JEV tests. Real `jev.py --dry-run` accepted our request (3 contract-drift tests) |
 | 6 | Diff, verification, audit, storage | COMPLETE | 63 tests: `pytest tests/test_verification.py` |
-| 7 | CLI | IN PROGRESS | — |
-| 8 | Benchmarks (incl. the one consented live JEV call) | NOT STARTED | — |
+| 7 | CLI | COMPLETE | 45 CLI tests. `pytest tests/test_cli.py`. Exit codes 0-7 verified as subprocesses |
+| 8 | Benchmarks (incl. the one consented live JEV call) | IN PROGRESS | — |
 | 9 | Documentation + ADRs | NOT STARTED | — |
 | 10 | Full verification + report | NOT STARTED | — |
 

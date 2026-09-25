@@ -74,11 +74,25 @@ class TestDeterministicPlannerGrounding:
         )
         assert normalize.target.sheet == "Summary"
 
-    def test_default_sheet_choice_is_recorded(
+    def test_default_sheet_choice_is_refused_for_a_mutating_request(
         self, planner: DeterministicPlanner, inspection
     ) -> None:  # noqa: ANN001
-        """A defaulted sheet choice is disclosed, not silently assumed."""
+        """A mutating request with no named target is refused, not guessed.
+
+        "normalise the data" names an operation but neither a sheet nor a column.
+        Applying it to every column of whichever sheet happens to be largest is a
+        change nobody asked for, so the planner refuses and says what to name.
+        """
         plan = planner.plan(task("normalise the data"), inspection)
+        assert plan.understanding.interpretation is InterpretationVerdict.REQUIRES_USER_INPUT
+        assert any("will not guess" in item for item in plan.understanding.missing_information)
+
+    def test_named_column_without_a_named_sheet_is_allowed(
+        self, planner: DeterministicPlanner, inspection
+    ) -> None:  # noqa: ANN001
+        """Naming the column is enough; the sheet default is disclosed, not hidden."""
+        plan = planner.plan(task("normalise the Customer names"), inspection)
+        assert plan.understanding.interpretation is InterpretationVerdict.SUFFICIENTLY_CLEAR
         assert "chosen as the largest sheet" in plan.understanding.intent_summary
 
 

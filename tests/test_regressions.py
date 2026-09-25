@@ -205,6 +205,127 @@ class TestColumnMentionIsLocalToItsClause:
         assert sort.by_columns == ["Amount"]
 
 
+class TestSheetNameDoesNotResolveToAColumn:
+    """A sheet can never name a column on itself.
+
+    "normalise the Customer column on the Sales sheet" leaked the token "Sales"
+    into column resolution, where the synonym table mapped it to the *Amount*
+    column — "sales" is listed as a synonym for amount. The request silently
+    normalised two columns instead of one.
+    """
+
+    def test_sheet_name_is_not_treated_as_a_column(self, sales: Path) -> None:
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText(
+                "normalise the Customer column on the Sales sheet", provenance="user_task"
+            ),
+            inspect_workbook(sales),
+        )
+        normalize = next(op for op in plan.operations if op.operation.value == "normalize_values")
+        assert normalize.columns == ["Customer"], (
+            f"only the named column should be touched, got {normalize.columns}"
+        )
+        assert "Amount" not in normalize.columns
+
+    def test_a_sheet_named_after_a_synonym_still_works(self, tmp_path: Path) -> None:
+        """The same request against a sheet genuinely named 'Total'."""
+        from app.workbook import inspect_workbook
+
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Total"
+        sheet.append(["Customer", "Region"])
+        for index in range(5):
+            sheet.append([f"c{index}", f"r{index}"])
+        path = tmp_path / "total.xlsx"
+        workbook.save(path)
+        workbook.close()
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText(
+                "normalise the Customer column on the Total sheet", provenance="user_task"
+            ),
+            inspect_workbook(path),
+        )
+        normalize = next(op for op in plan.operations if op.operation.value == "normalize_values")
+        assert normalize.target.sheet == "Total"
+        assert normalize.columns == ["Customer"]
+
+
+class TestMutatingRequestsMustBeSpecific:
+    """A request that names neither a sheet nor a column is refused.
+
+    "Tidy it up a bit" used to produce a plan that normalised every column of
+    whichever sheet happened to be largest — a change nobody asked for.
+    """
+
+    def test_vague_mutating_request_is_refused(self, sales: Path) -> None:
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText("tidy it up a bit", provenance="user_task"), inspect_workbook(sales)
+        )
+        assert plan.understanding.interpretation is InterpretationVerdict.REQUIRES_USER_INPUT
+        assert any("will not guess" in item for item in plan.understanding.missing_information)
+
+    def test_a_named_column_is_enough(self, sales: Path) -> None:
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText("tidy the Customer names", provenance="user_task"),
+            inspect_workbook(sales),
+        )
+        assert plan.understanding.interpretation is InterpretationVerdict.SUFFICIENTLY_CLEAR
+
+    def test_a_concept_named_key_is_enough(self, sales: Path) -> None:
+        """ "remove duplicate invoices" names no sheet but resolves its key."""
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText("remove duplicate invoices", provenance="user_task"),
+            inspect_workbook(sales),
+        )
+        assert plan.understanding.interpretation is InterpretationVerdict.SUFFICIENTLY_CLEAR
+        dedupe = next(op for op in plan.operations if op.operation.value == "remove_duplicates")
+        assert dedupe.keys == ["InvoiceId"]
+
+    def test_a_read_only_request_may_default_the_sheet(self, sales: Path) -> None:
+        """Reading the largest sheet is a safe default; only mutation is gated."""
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText("show me the data", provenance="user_task"), inspect_workbook(sales)
+        )
+        assert plan.understanding.interpretation is InterpretationVerdict.SUFFICIENTLY_CLEAR
+
+
+class TestPlainEnglishColumnReferences:
+    """Real requests name columns without saying "column"."""
+
+    @pytest.mark.parametrize(
+        ("phrase", "expected"),
+        [
+            ("trim whitespace from the notes", "Notes"),
+            ("clean the customer names", "Customer"),
+            ("normalise the region", "Region"),
+        ],
+    )
+    def test_article_phrases_resolve(self, sales: Path, phrase: str, expected: str) -> None:
+        from app.workbook import inspect_workbook
+
+        plan = DeterministicPlanner().plan(
+            UntrustedText(phrase, provenance="user_task"), inspect_workbook(sales)
+        )
+        normalize = next(
+            (op for op in plan.operations if op.operation.value == "normalize_values"),
+            None,
+        )
+        assert normalize is not None, phrase
+        assert expected in normalize.columns, f"{phrase!r} -> {normalize.columns}"
+
+
 class TestVerificationDoesNotMutateTheWorkbook:
     """Verification must not change the workbook it verifies.
 

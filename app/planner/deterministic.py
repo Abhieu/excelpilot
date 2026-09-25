@@ -146,6 +146,86 @@ _COLUMN_MENTION = re.compile(
     r"(?:column|field)\b",
     re.I,
 )
+#: "trim whitespace from the notes", "clean the customer names" — a column named
+#: with a plain article and no "column"/"field" suffix.
+#:
+#: Deliberately over-capturing. Resolution is the real filter: a captured word that
+#: is not an actual header simply does not resolve, so a wide net costs nothing and
+#: buys the recall that real phrasing needs. Without this, "trim whitespace from
+#: the notes" named no column at all and the request was refused.
+_ARTICLE_MENTION = re.compile(
+    r"\b(?:the|from|in|for|of|on|into|across)\s+"
+    # Without this, "from the notes" captures "the" rather than "notes".
+    r"(?!the\b|a\b|an\b|this\b|that\b|these\b|those\b|each\b|every\b|its\b|their\b|"
+    r"same\b|one\b|two\b|three\b|all\b|any\b|some\b|no\b|other\b|another\b)"
+    r"['\"`]?([A-Za-z][A-Za-z0-9_.\-]{0,38})['\"`]?",
+    re.I,
+)
+#: Words that follow an article but name something other than a column.
+_ARTICLE_NOISE = frozenset(
+    {
+        "the",
+        "workbook",
+        "file",
+        "sheet",
+        "tab",
+        "row",
+        "rows",
+        "column",
+        "columns",
+        "cell",
+        "cells",
+        "data",
+        "value",
+        "values",
+        "top",
+        "first",
+        "last",
+        "next",
+        "same",
+        "other",
+        "rest",
+        "whole",
+        "all",
+        "each",
+        "every",
+        "one",
+        "two",
+        "three",
+        "record",
+        "records",
+        "duplicate",
+        "duplicates",
+        "formula",
+        "formulas",
+        "result",
+        "results",
+        "list",
+        "lists",
+        "table",
+        "tables",
+        "summary",
+        "report",
+        "reports",
+        "above",
+        "below",
+        "left",
+        "right",
+        "end",
+        "start",
+        "request",
+        "task",
+        "way",
+        "order",
+        "name",
+        "names",
+        "amount",
+        "amounts",
+        "time",
+        "date",
+        "dates",
+    }
+)
 _LIMIT = re.compile(r"\b(?:top|first|limit)\s+(\d{1,7})\b", re.I)
 
 #: Concept words a request can use in place of a column name, mapped to the
@@ -206,6 +286,10 @@ UNSUPPORTED_GUIDANCE: dict[str, str] = {
         "ExcelPilot supports: normalise, remove duplicates, sort, filter, summarise, "
         "validate, and read."
     ),
+    "no_target_named": (
+        "Name the sheet or the column you want changed. ExcelPilot will not pick one "
+        "for you, because applying a change to the wrong column is not recoverable."
+    ),
 }
 
 
@@ -262,6 +346,30 @@ class DeterministicPlanner:
             operations.extend(built)
             missing.extend(intent_missing)
             notes.extend(intent_notes)
+
+        # A *mutating* request must resolve to something specific. "Tidy it up a
+        # bit" names an operation but neither a sheet nor a column, so building a
+        # plan means guessing both — and applying it to every column of whichever
+        # sheet happens to be largest is a change nobody asked for.
+        #
+        # Tested against the built operations rather than the raw request, so a
+        # request that *does* pin down its target still runs: "remove duplicate
+        # invoice records" names no sheet, yet resolves its key to InvoiceId and is
+        # therefore specific enough to act on.
+        if not sheets[0].matched_explicitly:
+            mutating = [op for op in operations if op.operation.value != "read_range"]
+            if mutating and not any(_names_a_column(op) for op in mutating):
+                return self._refusal(
+                    task,
+                    inspection,
+                    "no_target_named",
+                    [
+                        "the request does not identify which sheet or column to change, and "
+                        f"ExcelPilot will not guess. Available sheets: "
+                        f"{', '.join(inspection.sheet_names)}. Try naming one, for example "
+                        f"'normalise the Customer column on Sales'"
+                    ],
+                )
 
         if not operations:
             return self._refusal(
@@ -510,6 +618,40 @@ def _local_context(text: str, anchor: str) -> str:
     return text[start:end]
 
 
+def _names_a_column(operation: WorkbookOperation) -> bool:
+    """Whether an operation pins itself to at least one specific column.
+
+    Used to decide whether a request is specific enough to act on. An operation
+    that would apply itself to *every* column of a sheet is not specific, however
+    clearly the sheet itself was named.
+    """
+    kind = operation.operation.value
+    if kind in {
+        "read_range",
+        "create_worksheet",
+        "rename_worksheet",
+        "reconcile",
+        "set_formula",
+        "compare_workbooks",
+    }:
+        return True
+    # isinstance rather than comparing `operation.value`, so the union narrows and
+    # each attribute access is checked by the type checker.
+    if isinstance(operation, NormalizeValues):
+        return bool(operation.columns)
+    if isinstance(operation, RemoveDuplicates):
+        return bool(operation.keys)
+    if isinstance(operation, SortRange):
+        return bool(operation.by_columns)
+    if isinstance(operation, FilterRows):
+        return bool(operation.conditions)
+    if isinstance(operation, ApplyValidation):
+        return bool(operation.rules)
+    if isinstance(operation, CreateSummary):
+        return bool(operation.spec.group_by)
+    return False
+
+
 def _detect_intents(text: str) -> list[Intent]:
     """Collect every recognised intent, de-duplicated, in a stable order."""
     found: list[Intent] = []
@@ -619,12 +761,27 @@ def _mentioned_columns(text: str) -> tuple[str, ...]:
     """
     found: list[str] = []
     seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        name = name.strip().strip("'\"`").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            found.append(name)
+
+    # The two precise patterns are trusted as-is: "by Amount" and "the Notes
+    # column" are unambiguous, and filtering them through the article noise list
+    # would reject real column names like "Amount".
     for pattern in (_BY_COLUMN, _COLUMN_MENTION):
         for raw in pattern.findall(text):
-            name = raw.strip().strip("'\"`").strip()
-            if name and name.lower() not in seen:
-                seen.add(name.lower())
-                found.append(name)
+            _add(raw)
+
+    # The article pattern is deliberately over-capturing, so its captures are
+    # filtered against a noise list first. Anything that survives still has to
+    # resolve to a real header before it is used.
+    for raw in _ARTICLE_MENTION.findall(text):
+        if raw.strip().lower() not in _ARTICLE_NOISE:
+            _add(raw)
+
     return tuple(found)
 
 
@@ -750,9 +907,20 @@ def _content_words(text: str, *, limit: int = 4) -> list[str]:
 
 
 def _resolve_columns(names: tuple[str, ...], sheet: SheetMetadata) -> list[str]:
-    """Map requested column names onto the sheet's actual headers."""
+    """Map requested column names onto the sheet's actual headers.
+
+    A candidate equal to the sheet's own name is skipped. Without this, "on the
+    Sales sheet" leaked the token "Sales" into column resolution, where the
+    synonym table mapped it to the *Amount* column ("sales" is listed as a synonym
+    for amount) — so a request to normalise the Customer column also normalised
+    Amount. A sheet can never name a column on itself.
+    """
     resolved: list[str] = []
+    sheet_name = sheet.name.strip().lower()
     for name in names:
+        token = name.strip().lower()
+        if not token or token == sheet_name:
+            continue
         index = sheet.find_header(name)
         if index is not None and 1 <= index <= len(sheet.header_row):
             actual = sheet.header_row[index - 1]
@@ -761,7 +929,7 @@ def _resolve_columns(names: tuple[str, ...], sheet: SheetMetadata) -> list[str]:
             continue
         # Fall back to the synonym table for requests like "the customer column".
         for synonyms in COLUMN_SYNONYMS.values():
-            if name.strip().lower() in synonyms:
+            if token in synonyms:
                 for synonym in synonyms:
                     synonym_index = sheet.find_header(synonym)
                     if synonym_index is not None:
