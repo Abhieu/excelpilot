@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
-from app.contracts.base import ContractModel, UntrustedText
+from app.contracts.base import ContractModel, MutableContractModel, UntrustedText
 from app.contracts.enums import (
     ApprovalStatus,
     AutomationVerdict,
@@ -359,6 +359,7 @@ class OperationResult(ContractModel):
     rows_affected: int = Field(default=0, ge=0)
     rows_removed: int = Field(default=0, ge=0)
     rows_written: int = Field(default=0, ge=0)
+    rows_read: int = Field(default=0, ge=0)
     sheets_created: list[str] = Field(default_factory=list)
     sheets_renamed: list[str] = Field(default_factory=list)
     cells_neutralised: int = Field(
@@ -371,8 +372,13 @@ class OperationResult(ContractModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
-class ExecutionState(ContractModel):
-    """Aggregate outcome of a whole execution."""
+class ExecutionState(MutableContractModel):
+    """Aggregate outcome of a whole execution.
+
+    Mutable because it accumulates operation by operation: a run that fails on
+    operation 3 of 5 must be able to report operations 1 and 2 accurately. It is
+    still validated on every assignment.
+    """
 
     run_id: str
     operations: list[OperationResult] = Field(default_factory=list)

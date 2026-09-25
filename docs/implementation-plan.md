@@ -5,7 +5,7 @@
 > established by running a command; everything else is a plan, not a result.
 
 - **Project:** ExcelPilot — AI Excel Operations Engine
-- **Status:** Phase 4 — Operations and executor (in progress)
+- **Status:** Phase 5 — Planner, JEV adapter, policy (in progress)
 - **Last updated:** 2026-09-25
 
 ---
@@ -189,8 +189,8 @@ Forbidden and tested-for:
 | 1 | Repo, tooling, plan, ADRs 0001–0012 | COMPLETE | `ruff check` + `ruff format --check` + `mypy` clean |
 | 2 | Typed contracts | COMPLETE | 85 tests: `pytest tests/test_contracts.py tests/test_architecture.py` |
 | 3 | Workbook engine | COMPLETE | 63 tests + 6 slow real-workbook tests. `make test-slow`: 6 passed in 316s |
-| 4 | Operations + executor | IN PROGRESS | — |
-| 5 | Planner, JEV adapter, policy | NOT STARTED | — |
+| 4 | Operations + executor | COMPLETE | 55 executor tests. `pytest tests/test_executor.py` |
+| 5 | Planner, JEV adapter, policy | IN PROGRESS | Policy done (36 tests, `pytest tests/test_policy.py`) |
 | 6 | Diff, verification, audit, storage | NOT STARTED | — |
 | 7 | CLI | NOT STARTED | — |
 | 8 | Benchmarks (incl. the one consented live JEV call) | NOT STARTED | — |

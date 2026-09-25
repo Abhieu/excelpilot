@@ -53,6 +53,30 @@ class ContractModel(BaseModel):
         return self.model_dump(mode="json")
 
 
+class MutableContractModel(BaseModel):
+    """Base for contracts that are genuinely accumulated over time.
+
+    Most contracts are immutable value objects and should use
+    :class:`ContractModel`. A few are progress accumulators — an execution state
+    grows operation by operation — and making those frozen would mean
+    reconstructing the whole object on every step for no benefit.
+
+    Mutable does not mean unvalidated: ``extra="forbid"`` and
+    ``validate_assignment=True`` still apply, so an unknown or wrongly-typed
+    field is still an error.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=False,
+        validate_assignment=True,
+        str_strip_whitespace=True,
+    )
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class UntrustedText:
     """Text originating outside ExcelPilot's control.
 
@@ -223,6 +247,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "CellCoordinate",
     "ContractModel",
+    "MutableContractModel",
     "MAX_UNTRUSTED_CHARS",
     "UntrustedText",
     "column_index",

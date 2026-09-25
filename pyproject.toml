@@ -97,6 +97,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG", "N802"]
 "app/cli/*" = ["T201"]  # CLI legitimately prints
+# Every operation handler takes (workbook, operation, context) so the registry can
+# call them uniformly. Not every handler needs the context today; that is fine and
+# the signature stays stable as operations are added.
+"app/executor/operations.py" = ["ARG001"]
+# Policy rules share one (request, thresholds) signature so the Rule dataclass can
+# invoke them uniformly. Some rules do not read every threshold.
+"app/policy/rules.py" = ["ARG001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
