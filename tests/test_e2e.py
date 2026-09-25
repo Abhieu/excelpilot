@@ -451,11 +451,10 @@ class TestConcurrencyAndLocking:
         from app.storage import RunLocked
 
         store = FileRunStore(config)
-        with store.lock("run-locked"):
-            # Must *enter* the inner context manager for the lock to be taken.
-            with pytest.raises(RunLocked):
-                with store.lock("run-locked"):
-                    pass
+        # Must *enter* the inner context manager for the lock to be taken, so
+        # `pytest.raises` wraps the `with`, not just the call.
+        with store.lock("run-locked"), pytest.raises(RunLocked), store.lock("run-locked"):
+            pass
 
     def test_distinct_run_ids_do_not_collide(
         self, source: Path, orchestrator: RunOrchestrator
