@@ -15,6 +15,8 @@ JEV verdict of ``automation: yes`` at probability 0.99 changes nothing.
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.contracts.config import ExcelPilotConfig
 from app.contracts.enums import PolicyOutcome, RiskLevel
 from app.contracts.pipeline import JevDecisionSet, PolicyDecision, PolicyRequest
@@ -167,7 +169,7 @@ def _jev_summary(jev: JevDecisionSet) -> str:
     return "; ".join(parts) or "no decisions returned"
 
 
-def explain(config: ExcelPilotConfig | None = None) -> dict[str, object]:
+def explain(config: ExcelPilotConfig | None = None) -> dict[str, Any]:
     """Describe the effective policy, for ``excelpilot policy explain``."""
     effective = config or ExcelPilotConfig()
     return {

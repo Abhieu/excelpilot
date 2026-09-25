@@ -245,14 +245,17 @@ class RunOrchestrator:
         *,
         run_id: str | None = None,
         jev: JevAdapter | None = None,
-    ) -> tuple[ExecutionPlan, Any, JevDecisionSet | None, PolicyDecision | None]:
+    ) -> tuple[ExecutionPlan, Any, JevDecisionSet, PolicyDecision]:
         """Inspect, plan, decide, and evaluate policy — without executing.
 
-        This is what ``plan`` and ``run --dry-run`` use.
+        This is what ``plan`` and ``run --dry-run`` use. Policy is always
+        non-optional here: an advisory decision set and a verdict are both
+        always produced, so a caller never has to handle "no opinion".
         """
         inspection = self.inspect(path)
-        understanding, plan = self._build_plan(task, inspection, run_id or new_run_id())
+        _understanding, plan = self._build_plan(task, inspection, run_id or new_run_id())
         jev_result = self._decide(plan, inspection, jev)
+        self._last_jev = jev_result
         policy = self._evaluate_policy(plan, inspection)
         return plan, inspection, jev_result, policy
 
