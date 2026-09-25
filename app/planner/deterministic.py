@@ -30,6 +30,7 @@ from typing import Protocol
 from app.contracts.base import UntrustedText
 from app.contracts.enums import InterpretationVerdict
 from app.contracts.operations import (
+    ApplyValidation,
     CreateSummary,
     FilterCondition,
     FilterRows,
@@ -63,6 +64,9 @@ class Intent:
     sort_by: tuple[str, ...] = ()
     descending: bool = False
     limit: int | None = None
+    phrase: str = ""
+    """The full request text, so an intent builder can look at context around
+    its own keywords. Destructive operations need this to avoid guessing."""
 
 
 @dataclass(slots=True)
@@ -126,53 +130,83 @@ _SHEET_AFTER_PREPOSITION = re.compile(
     r"\b(?:sheet|tab|worksheet)\s+(?:called|named|titled)?\s*['\"\`]?([A-Za-z0-9 _.\-]{1,64})['\"`]?",
     re.I,
 )
-_BY_COLUMN = re.compile(r"\bby\s+['\"\`]?([A-Za-z0-9 _.\-]{1,40})['\"`]?", re.I)
-#: "the Customer column", "Customer field", "Amount column" — the other common way
-#: a request names a column, alongside "by <column>".
+_BY_COLUMN = re.compile(r"\bby\s+['\"`]?([A-Za-z][A-Za-z0-9_.\-]{0,38})['\"`]?", re.I)
+#: "the Customer column", "Customer field" - the other common way a request names
+#: a column, alongside "by <column>".
+#:
+#: The captured name is deliberately a **single token**. An earlier version allowed
+#: spaces, which let the match start at the beginning of the sentence: given
+#: "normalise the Customer column, remove duplicate invoices", the regex captured
+#: "normalise the Customer" rather than "Customer", because a regex engine takes
+#: the earliest viable start position. Multi-word headers remain reachable through
+#: the synonym table and ``find_header``.
 _COLUMN_MENTION = re.compile(
-    r"\b(?:the\s+)?['\"\`]?([A-Za-z][A-Za-z0-9 _.\-]{0,38}?)['\"`]?\s+"
-    r"(?:column|field|values?)\b",
+    r"(?:\b(?:the|this|that|each|every|its|their|same|one|a|an)\s+)?"
+    r"['\"`]?([A-Za-z][A-Za-z0-9_.\-]{0,38})['\"`]?\s+"
+    r"(?:column|field)\b",
     re.I,
-)
-#: Leading words that are part of the phrase, not the column name.
-_COLUMN_LEADING_NOISE = frozenset(
-    {"the", "a", "an", "that", "this", "each", "every", "its", "their", "same", "one"}
 )
 _LIMIT = re.compile(r"\b(?:top|first|limit)\s+(\d{1,7})\b", re.I)
 
+#: Concept words a request can use in place of a column name, mapped to the
+#: column synonyms that satisfy them.
+_CONCEPT_TOKENS: dict[str, tuple[str, ...]] = {
+    "invoice": COLUMN_SYNONYMS["invoice"],
+    "invoices": COLUMN_SYNONYMS["invoice"],
+    "customer": COLUMN_SYNONYMS["customer"],
+    "customers": COLUMN_SYNONYMS["customer"],
+    "client": COLUMN_SYNONYMS["customer"],
+    "clients": COLUMN_SYNONYMS["customer"],
+    "region": COLUMN_SYNONYMS["region"],
+    "regions": COLUMN_SYNONYMS["region"],
+    "product": COLUMN_SYNONYMS["product"],
+    "products": COLUMN_SYNONYMS["product"],
+    "date": COLUMN_SYNONYMS["date"],
+    "dates": COLUMN_SYNONYMS["date"],
+    "amount": COLUMN_SYNONYMS["amount"],
+    "amounts": COLUMN_SYNONYMS["amount"],
+    "quantity": COLUMN_SYNONYMS["quantity"],
+    "status": COLUMN_SYNONYMS["status"],
+    "id": COLUMN_SYNONYMS["id"],
+    "identifier": COLUMN_SYNONYMS["id"],
+    "email": COLUMN_SYNONYMS["email"],
+}
 
-def _mentioned_columns(text: str) -> tuple[str, ...]:
-    """Column names the request names, via "by X" or "the X column".
 
-    Returns them in the order they appear, de-duplicated, with leading filler
-    words ("the", "each") stripped so "the Customer column" yields "Customer".
-    """
-    found: list[str] = []
-    for pattern in (_BY_COLUMN, _COLUMN_MENTION):
-        for raw in pattern.findall(text):
-            name = raw.strip().strip("'\"`").strip()
-            while name.lower() in _COLUMN_LEADING_NOISE:
-                name = name.split(None, 1)[1] if " " in name else ""
-            if not name:
-                continue
-            # "sort by Amount descending" -> "Amount descending"; keep the head.
-            name = (
-                name.split()[0]
-                if len(name.split()) > 1
-                and name.split()[-1].lower()
-                in {
-                    "descending",
-                    "ascending",
-                    "column",
-                    "field",
-                    "values",
-                    "value",
-                }
-                else name
+def _first_unsupported(lowered: str) -> tuple[str, str] | None:
+    """The first unsupported request pattern, with a reason an operator can act on."""
+    for name, pattern in _UNSUPPORTED_PATTERNS:
+        if pattern.search(lowered):
+            return (
+                name,
+                f"the request asks for something ExcelPilot does not support ({name}); "
+                f"supported operations are normalise, remove duplicates, sort, filter, "
+                f"summarise, validate, and read",
             )
-            if name and name.lower() not in {existing.lower() for existing in found}:
-                found.append(name)
-    return tuple(found)
+    return None
+
+
+#: Shown to the operator when a request is refused, keyed by reason.
+UNSUPPORTED_GUIDANCE: dict[str, str] = {
+    "delete_sheet": "ExcelPilot never deletes a worksheet. Create a summary sheet instead.",
+    "delete_column": (
+        "ExcelPilot does not delete columns. Filter to the columns you need, or write them "
+        "to a new sheet."
+    ),
+    "run_code": (
+        "ExcelPilot does not execute generated code. Describe the change in terms of the "
+        "supported operations."
+    ),
+    "send_email": "ExcelPilot does not send email. It writes files and reports.",
+    "merge_workbooks": (
+        "ExcelPilot operates on one workbook at a time. Use the compare operation to "
+        "reconcile two files."
+    ),
+    "no_supported_operation": (
+        "ExcelPilot supports: normalise, remove duplicates, sort, filter, summarise, "
+        "validate, and read."
+    ),
+}
 
 
 class DeterministicPlanner:
@@ -294,15 +328,18 @@ class DeterministicPlanner:
             )
 
         elif intent.name == "remove_duplicates":
-            keys = _resolve_columns(intent.columns, sheet)
-            if intent.columns and not keys:
-                missing.append(
-                    f"duplicate key column(s) not found on {sheet.name!r}; "
-                    f"available: {', '.join(sheet.header_row[:20])}"
-                )
+            # Destructive: resolved under the strict rule in _resolve_dedupe_keys.
+            keys, refusal = _resolve_dedupe_keys(intent.phrase, sheet)
+            if refusal:
+                missing.append(refusal)
                 return operations, missing, notes
             operations.append(RemoveDuplicates(target=target, keys=keys))
-            notes.append(f"duplicate removal keyed on {keys or 'whole rows'}")
+            notes.append(
+                f"duplicate removal keyed on {keys}"
+                if keys
+                else "duplicate removal on whole rows (no key was named, so only exact "
+                "whole-row matches are removed)"
+            )
 
         elif intent.name == "sort":
             keys = _resolve_columns(intent.columns or intent.sort_by, sheet)
@@ -393,10 +430,7 @@ class DeterministicPlanner:
             if not rules:
                 missing.append(f"no column on {sheet.name!r} could be checked for completeness")
                 return operations, missing, notes
-            from app.contracts.operations import ApplyValidation, ValidationRule
-
             operations.append(ApplyValidation(target=target, rules=rules, report_only=True))
-            del ValidationRule
             notes.append("validation is report-only; nothing is written")
 
         elif intent.name == "read":
@@ -441,40 +475,39 @@ class DeterministicPlanner:
         )
 
 
-def _first_unsupported(lowered: str) -> tuple[str, str] | None:
-    """The first unsupported request pattern, with a reason an operator can act on."""
-    for name, pattern in _UNSUPPORTED_PATTERNS:
-        if pattern.search(lowered):
-            return (
-                name,
-                f"the request asks for something ExcelPilot does not support ({name}); "
-                f"supported operations are normalise, remove duplicates, sort, filter, "
-                f"summarise, validate, and read",
-            )
-    return None
-
-
-#: Shown to the operator when a request is refused, keyed by reason.
-UNSUPPORTED_GUIDANCE: dict[str, str] = {
-    "delete_sheet": "ExcelPilot never deletes a worksheet. Create a summary sheet instead.",
-    "delete_column": (
-        "ExcelPilot does not delete columns. Filter to the columns you need, or write them "
-        "to a new sheet."
-    ),
-    "run_code": (
-        "ExcelPilot does not execute generated code. Describe the change in terms of the "
-        "supported operations."
-    ),
-    "send_email": "ExcelPilot does not send email. It writes files and reports.",
-    "merge_workbooks": (
-        "ExcelPilot operates on one workbook at a time. Use the compare operation to "
-        "reconcile two files."
-    ),
-    "no_supported_operation": (
-        "ExcelPilot supports: normalise, remove duplicates, sort, filter, summarise, "
-        "validate, and read."
-    ),
+#: The keyword each intent is anchored on, used to find its local context.
+_INTENT_ANCHOR: dict[str, str] = {
+    "remove_duplicates": r"duplicat|dedup|de-?dup",
+    "normalize": r"normalis|normaliz|clean|trim|standardis|standardiz|tidy",
+    "sort": r"\bsort\b|\border\b",
+    "filter": r"\bfilter\b|\bonly\b|\bwhere\b",
+    "summarize": r"summar|pivot|breakdown|aggregat|total",
+    "validate": r"validat|missing|required",
+    "read": r"^\s*(read|show|list|display|inspect|report)",
 }
+
+#: How far each intent's context extends either side of its anchor, in
+#: characters. Wide enough for "remove duplicate records by InvoiceId", narrow
+#: enough that a neighbouring clause's columns do not leak in.
+_INTENT_WINDOW = 60
+
+
+def _local_context(text: str, anchor: str) -> str:
+    """The slice of the request belonging to one intent.
+
+    This is what keeps a compound request from cross-contaminating. In
+    "normalise the Customer column, remove duplicate invoices, and create a
+    summary by Region", the dedupe clause must not inherit Region or Customer.
+    Taking columns from the whole request is exactly what produced a dedupe key of
+    ``[Region, Customer]`` - a valid pair of real columns, so it passed every
+    validation, while collapsing 38 of 42 rows.
+    """
+    match = re.search(anchor, text, re.IGNORECASE)
+    if match is None:
+        return text
+    start = max(0, match.start() - _INTENT_WINDOW)
+    end = min(len(text), match.end() + _INTENT_WINDOW)
+    return text[start:end]
 
 
 def _detect_intents(text: str) -> list[Intent]:
@@ -488,18 +521,18 @@ def _detect_intents(text: str) -> list[Intent]:
         if key in seen:
             continue
         seen.add(key)
-
-        columns = _mentioned_columns(text)
-        limit_match = _LIMIT.search(text)
+        local = _local_context(text, _INTENT_ANCHOR.get(key, r".*?"))
+        local_columns = _mentioned_columns(local)
         found.append(
             Intent(
                 name=key,
-                columns=columns,
-                sort_by=columns if key == "sort" else (),
+                columns=local_columns,
+                sort_by=local_columns if key == "sort" else (),
                 descending=bool(
-                    re.search(r"\bdescending\b|\bhighest\b|\blargest\b|\bnewest\b", text, re.I)
+                    re.search(r"\bdescending\b|\bhighest\b|\blargest\b|\bnewest\b", local, re.I)
                 ),
-                limit=int(limit_match.group(1)) if limit_match else None,
+                limit=int(m.group(1)) if (m := _LIMIT.search(local)) else None,
+                phrase=local,
             )
         )
     return found
@@ -510,18 +543,18 @@ def _candidate_sheets(text: str, inspection: WorkbookInspection) -> list[_SheetC
 
     Three tiers of evidence, deliberately distinguished:
 
-    1. **Quoted** — ``'Sales'`` or ``"Sales"``. Unambiguous.
-    2. **Introduced** — "on the Sales sheet", "sheet Sales". Unambiguous.
-    3. **Bare mention** — the sheet name appears as a whole word. Weak.
+    1. **Quoted** - ``'Sales'`` or ``"Sales"``. Unambiguous.
+    2. **Introduced** - "on the Sales sheet", "sheet Sales". Unambiguous.
+    3. **Capitalised bare mention** - the name appears as a capitalised whole word.
 
-    Tier 3 is kept separate because of a real failure mode this planner hit: a
-    workbook containing a sheet literally named ``Summary`` must not capture the
-    request "create a summary by Region", where "summary" is the *operation*, not
-    the target. A bare word-boundary match therefore scores far below a quoted or
-    introduced name, and the data-size term breaks the remaining ties.
+    Tier 3 requires capitalisation because a sheet name is a proper noun in a
+    request ("on Sales"), whereas an operation word is not. That is what stops a
+    sheet literally named ``Summary`` from capturing the request *"create a summary
+    by Region"*, where "summary" names the operation rather than the target. This
+    was a real bug, found by a test.
 
-    When no sheet is named at all, the largest sheet is chosen and the plan's
-    intent summary records that it was a default rather than an instruction.
+    When no sheet is named, the largest sheet is chosen and the plan's intent
+    summary records that it was a default rather than an instruction.
     """
     scored: list[_SheetCandidate] = []
     quoted = {name.strip().lower() for name in _SHEET_QUOTED.findall(text)}
@@ -540,15 +573,13 @@ def _candidate_sheets(text: str, inspection: WorkbookInspection) -> list[_SheetC
             score += 80
             explicit = True
         elif _mentions_word(text, name):
-            # Capitalised proper-noun mention: a real reference, though weaker
-            # than an explicit "the Sales sheet" construction.
             score += 30
             explicit = True
         else:
             score += min(len(name), 30) // 10
 
         if not sheet.is_visible:
-            # Prefer a visible sheet, but an explicitly named hidden sheet still wins.
+            # Prefer a visible sheet, but an explicitly named hidden sheet wins.
             score -= 20 if not explicit else 0
 
         # Data volume breaks ties, so an unnamed request lands on the sheet that
@@ -568,20 +599,154 @@ def _mentions_word(text: str, name: str) -> bool:
     * **Word boundaries**, so a sheet named ``Sales`` is not matched inside
       "wholesale", nor ``Data`` inside "metadata".
     * **Capitalisation**, because a sheet name is a proper noun in a request
-      ("on Sales"), whereas an operation word is not. This is what stops a sheet
-      literally named ``Summary`` from capturing the request *"create a summary
-      by Region"*, where "summary" names the operation rather than the target.
+      ("on Sales"), whereas an operation word is not.
 
-    Requests that name a sheet in lowercase ("on sales") still work — the
-    introduced and quoted tiers catch those.
+    Requests that name a sheet in lowercase ("on sales") still work: the quoted and
+    introduced tiers catch those.
     """
     if not name:
         return False
     for match in re.finditer(rf"(?<!\w)({re.escape(name)})(?!\w)", text):
-        # match.group(1) is the text as it actually appeared in the request.
         if match.group(1)[:1].isupper():
             return True
     return False
+
+
+def _mentioned_columns(text: str) -> tuple[str, ...]:
+    """Column names the request names, via "by X" or "the X column".
+
+    Returns them in order, de-duplicated, case-insensitively.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_BY_COLUMN, _COLUMN_MENTION):
+        for raw in pattern.findall(text):
+            name = raw.strip().strip("'\"`").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                found.append(name)
+    return tuple(found)
+
+
+def _resolve_dedupe_keys(text: str, sheet: SheetMetadata) -> tuple[list[str], str | None]:
+    """Resolve the duplicate key, refusing to guess.
+
+    A duplicate key is **destructive**: a wrong one silently deletes rows that
+    were not duplicates. This is the most dangerous inference available to the
+    planner, so it follows a stricter rule than every other intent:
+
+    * a key named in the dedupe clause is used, if it resolves
+      ("remove duplicates by InvoiceId");
+    * otherwise a concept named in that clause is honoured
+      ("remove duplicate invoices" -> the invoice-id column);
+    * otherwise the key is **not** inferred. A missing-information signal is
+      returned and policy denies the run.
+
+    Only the dedupe clause is consulted — never columns mentioned elsewhere in the
+    request. An earlier version took them from anywhere, and on "normalise the
+    Customer column, remove duplicate invoices, and create a summary by Region"
+    produced the key ``[Region, Customer]``: a valid pair of real columns, so it
+    passed every validation, while collapsing 38 of 42 rows. Policy escalated it
+    and verification caught the row loss, but the correct fix is not to emit it.
+    """
+    tail = _text_after(text, r"duplicat|dedup|de-?dup")
+
+    # 1. An explicit key clause: "duplicates by InvoiceId", "duplicate rows on OrderNo".
+    explicit = re.search(
+        r"\b(?:by|on|keyed\s+on|using|based\s+on|for)\s+['\"`]?([A-Za-z][A-Za-z0-9_.\-]{0,38})",
+        tail,
+        re.IGNORECASE,
+    )
+    if explicit:
+        resolved = _resolve_columns((explicit.group(1),), sheet)
+        if resolved:
+            return resolved, None
+
+    # 2. A concept named directly in the dedupe clause: "duplicate invoices".
+    #
+    # Deliberately not one clever regex. An earlier version stripped a leading
+    # preposition, and the `in` alternative matched the first two letters of
+    # "invoice", so "remove duplicate invoice records" resolved nothing. Taking
+    # whole words and looking each up is simpler and correct.
+    for token in _content_words(tail):
+        synonyms = _CONCEPT_TOKENS.get(token.lower())
+        if synonyms:
+            match = _first_matching(sheet, synonyms)
+            if match:
+                return [match], None
+
+    # 3. Nothing stated: refuse.
+    return [], (
+        f"the duplicate key column was not identified on {sheet.name!r}; ExcelPilot will "
+        f"not guess a destructive key. Name it explicitly, for example "
+        f"'remove duplicates by InvoiceId'. Available columns: "
+        f"{', '.join(header for header in sheet.header_row if header) or '(none)'}"
+    )
+
+
+#: Words that describe the row, not the key. Skipped when looking for a concept.
+_ROW_NOISE = frozenset(
+    {
+        "records",
+        "record",
+        "rows",
+        "row",
+        "entries",
+        "entry",
+        "values",
+        "value",
+        "on",
+        "by",
+        "in",
+        "of",
+        "the",
+        "a",
+        "an",
+        "and",
+        "then",
+        "also",
+        "all",
+        "any",
+        "from",
+        "for",
+        "with",
+        "duplicate",
+        "duplicates",
+        "duplicated",
+        "dedupe",
+    }
+)
+
+
+def _text_after(text: str, anchor: str) -> str:
+    """The clause following the first match of ``anchor``.
+
+    Bounded at a **clause boundary** — a comma, "and", "then", or a full stop —
+    not merely at a character count. A character bound is not enough: in
+    "remove duplicate invoices, and create a summary by Region", the next 60
+    characters still contain "by Region", so a window alone let a neighbouring
+    clause supply this clause's dedupe key.
+    """
+    match = re.search(anchor, text, re.IGNORECASE)
+    if match is None:
+        return text
+    tail = text[match.end() :]
+    boundary = re.search(r"\s*(?:,|\.|;|\band\b|\bthen\b|\balso\b|\bbut\b)", tail, re.IGNORECASE)
+    if boundary is not None:
+        tail = tail[: boundary.start()]
+    return tail[:_INTENT_WINDOW]
+
+
+def _content_words(text: str, *, limit: int = 4) -> list[str]:
+    """The first ``limit`` content words, skipping row-describing noise."""
+    found: list[str] = []
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9_.\-]*", text):
+        if word.lower() in _ROW_NOISE:
+            continue
+        found.append(word)
+        if len(found) >= limit:
+            break
+    return found
 
 
 def _resolve_columns(names: tuple[str, ...], sheet: SheetMetadata) -> list[str]:

@@ -612,8 +612,9 @@ def handle_remove_duplicates(
     data_start = resolved.min_row + (1 if view.headers else 0)
 
     # Delete from the bottom so earlier row indices stay valid.
-    for position in sorted(remove, reverse=True):
-        worksheet.delete_rows(data_start + position, 1)
+    removed_rows = sorted((data_start + position for position in remove), reverse=True)
+    for row_number in removed_rows:
+        worksheet.delete_rows(row_number, 1)
 
     return OperationResult(
         operation=operation.operation.value,
@@ -625,6 +626,12 @@ def handle_remove_duplicates(
             "keys": operation.keys or ["(whole row)"],
             "kept": operation.keep,
             "rows_remaining": len(keep),
+            # Coordinates of the rows deleted, as 'Sheet!Row', so the verifier can
+            # tell "formulas were destroyed" apart from "rows were deliberately
+            # removed". Without this, any dedupe of formula-bearing rows looks
+            # like formula loss, and the run fails for doing exactly what it was
+            # asked to do.
+            "removed_rows": [f"{view.sheet}!{row}" for row in reversed(removed_rows)],
         },
     )
 

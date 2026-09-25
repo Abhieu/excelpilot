@@ -316,30 +316,73 @@ def check_column_consistency(workbook: Any) -> CheckResult:
 def detect_formula_loss(
     before_formulas: dict[tuple[str, str], str],
     after_workbook: Any,
+    *,
+    explained_removals: set[tuple[str, int]] | None = None,
 ) -> tuple[CheckResult, list[FormulaIssue]]:
     """Find formulas that were present and are now gone.
 
     The strongest available proxy for "this operation destroyed a formula", since
     ExcelPilot cannot ask Excel what the cell *would* have evaluated to.
+
+    ``explained_removals`` holds ``(sheet, row)`` pairs for rows the run
+    deliberately deleted. Two consequences are handled explicitly:
+
+    1. Formulas **on** those rows disappear with them, which is expected.
+    2. Every formula **below** a removed row shifts up. openpyxl moves the
+       formula text without rewriting its references, so a coordinate-keyed
+       comparison sees the same formula at a different coordinate and calls it a
+       change when it is really a shift.
+
+    Consequence 2 cannot be resolved without recalculating the workbook, which
+    ExcelPilot cannot do. So when a run removed rows, a shift is reported as
+    ``WARNING`` with the affected cells listed — not failed for doing what it was
+    asked, and not silently passed. When no row was removed, any change genuinely
+    is suspicious and fails.
     """
     after = {
         (sheet, coordinate): formula
         for sheet, coordinate, formula in collect_formulas(after_workbook)
     }
+    explained = explained_removals or set()
     lost: list[FormulaIssue] = []
+    shifted: list[FormulaIssue] = []
+    removed_with_row = 0
+
+    # Formulas that still exist somewhere in the same sheet, under a new
+    # coordinate, are the ones that moved.
+    after_texts: dict[str, set[str]] = {}
+    for (sheet, _coordinate), formula in after.items():
+        after_texts.setdefault(sheet, set()).add(formula)
+
+    # Sheets that lost rows: on those, a formula that still exists elsewhere in
+    # the sheet has moved rather than changed.
+    shifted_sheets = {sheet for sheet, _row in explained}
+
     for key, formula in before_formulas.items():
-        if key not in after:
-            lost.append(
+        if key in after and after[key] == formula:
+            continue
+        try:
+            row_number, _column = _split_coordinate(key[1])
+        except ValueError:
+            row_number = -1
+        if (key[0], row_number) in explained:
+            removed_with_row += 1
+            continue
+        if key[0] in shifted_sheets and formula in after_texts.get(key[0], set()):
+            # The same formula text still exists in this sheet, at another
+            # coordinate: a row removal moved it.
+            shifted.append(
                 FormulaIssue(
                     key[0],
                     key[1],
-                    "formula_removed",
-                    "formula present before the run is absent now",
+                    "formula_shifted",
+                    "the same formula now appears at a different row, consistent with a "
+                    "row removal",
                     formula,
                 )
             )
             continue
-        if after[key] != formula:
+        if key in after:
             lost.append(
                 FormulaIssue(
                     key[0],
@@ -349,18 +392,44 @@ def detect_formula_loss(
                     formula,
                 )
             )
+        else:
+            lost.append(
+                FormulaIssue(
+                    key[0],
+                    key[1],
+                    "formula_removed",
+                    "formula present before the run is absent now",
+                    formula,
+                )
+            )
 
-    status = VerificationStatus.FAILED if lost else VerificationStatus.PASSED
+    if lost:
+        status = VerificationStatus.FAILED
+        message = f"{len(lost)} formula(s) were removed or changed"
+    elif shifted:
+        status = VerificationStatus.WARNING
+        message = (
+            f"{len(shifted)} formula(s) moved rows, consistent with the "
+            f"{len(explained)} row(s) this run deleted; whether their references still "
+            f"resolve cannot be determined without recalculating the workbook"
+        )
+    else:
+        status = VerificationStatus.PASSED
+        message = "all previously present formulas are intact"
+    if removed_with_row and not lost and not shifted:
+        message += f"; {removed_with_row} disappeared with rows the run deliberately removed"
+
     return (
         CheckResult(
             name="formula_preservation",
             status=status,
-            message=(
-                f"{len(lost)} formula(s) were removed or changed"
-                if lost
-                else "all previously present formulas are intact"
-            ),
-            details={"issues": [issue.describe() for issue in lost[:25]], "count": len(lost)},
+            message=message,
+            details={
+                "issues": [issue.describe() for issue in [*lost, *shifted][:25]],
+                "count": len(lost),
+                "shifted": len(shifted),
+                "explained_by_row_removal": removed_with_row,
+            },
         ),
         lost,
     )
@@ -419,6 +488,7 @@ def static_formula_checks(
     *,
     before_formulas: dict[tuple[str, str], str] | None = None,
     expected_sheets: Iterable[str] | None = None,
+    explained_removals: set[tuple[str, int]] | None = None,
 ) -> list[CheckResult]:
     """Run every static formula check and return the results.
 
@@ -432,7 +502,9 @@ def static_formula_checks(
         check_column_consistency(after_workbook),
     ]
     if before_formulas is not None:
-        preservation, _lost = detect_formula_loss(before_formulas, after_workbook)
+        preservation, _lost = detect_formula_loss(
+            before_formulas, after_workbook, explained_removals=explained_removals
+        )
         results.append(preservation)
         results.append(detect_hardcoded_replacements(before_formulas, after_workbook))
     return results

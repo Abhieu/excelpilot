@@ -142,6 +142,17 @@ class Executor:
                 state.errors.append(f"{result.operation}: {result.error}")
 
         state.status = "failed" if state.errors else "applied"
+        # Carry the reconciliation outcomes out of the operation context, so the
+        # verifier and the manifest can report them without re-running anything.
+        state.reconciliation_results = list(context.reconciliation_results)
+        # And the coordinates deliberately deleted, so the verifier can tell an
+        # intentional row removal from accidental formula loss.
+        state.removed_coordinates = [
+            coordinate
+            for result in state.operations
+            for coordinate in result.details.get("removed_rows", [])
+            if isinstance(coordinate, str)
+        ]
         return state
 
     def _guard_operation(

@@ -48,6 +48,7 @@ class Verifier:
         actual_cells_changed: int = 0,
         reconciliation: ReconciliationReport | None = None,
         output_hash: str | None = None,
+        removed_rows: list[str] | None = None,
     ) -> VerificationResult:
         """Verify an output workbook against the pre-run state and the plan."""
         structural: list[CheckResult] = []
@@ -87,6 +88,7 @@ class Verifier:
                 planned_cells_changed=planned_cells_changed,
                 actual_cells_changed=actual_cells_changed,
                 output_hash=output_hash,
+                removed_rows=removed_rows,
             )
         except ExcelPilotError as error:
             # The file passed the readability check but could not be analysed.
@@ -124,6 +126,7 @@ class Verifier:
         planned_cells_changed: int,
         actual_cells_changed: int,
         output_hash: str | None,
+        removed_rows: list[str] | None,
     ) -> VerificationResult:
         """Run the checks that need the workbook open.
 
@@ -162,6 +165,7 @@ class Verifier:
                     after,
                     before_formulas=before_formulas or None,
                     expected_sheets=expected_sheets,
+                    explained_removals=_parse_removed_rows(removed_rows),
                 )
             )
 
@@ -214,6 +218,21 @@ class Verifier:
             output_hash=output_hash,
             notes=notes,
         )
+
+
+def _parse_removed_rows(removed_rows: list[str] | None) -> set[tuple[str, int]]:
+    """Turn ``['Sales!42', ...]`` into ``{('Sales', 42), ...}``.
+
+    These are the rows a run deliberately deleted, so the formula-preservation
+    check can tell an intentional removal from an accidental loss.
+    """
+    parsed: set[tuple[str, int]] = set()
+    for entry in removed_rows or []:
+        sheet, _, row = entry.rpartition("!")
+        if not sheet or not row.isdigit():
+            continue
+        parsed.add((sheet, int(row)))
+    return parsed
 
 
 def _overall_status(

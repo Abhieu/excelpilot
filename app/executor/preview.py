@@ -114,6 +114,7 @@ def _simulate(
     records_requiring_review = 0
     structural = False
     warnings: list[str] = []
+    _results: list[Any] = []
 
     for operation in operations:
         handler = handler_for(operation.operation)
@@ -132,6 +133,7 @@ def _simulate(
             )
             continue
 
+        _results.append(result)
         target_sheet = _sheet_of(operation)
         if target_sheet:
             sheets_affected.add(target_sheet)
@@ -163,6 +165,14 @@ def _simulate(
 
     after = _snapshot_cells(workbook)
     changed, removed, added, formulas_to_remove = _compare(before, after)
+    # `changed` only counts cells present in both snapshots. A sheet the run
+    # *creates* is all new cells, so it is added separately — otherwise a plan
+    # that writes a summary sheet reports a far smaller change than it will
+    # actually make, and the planned-vs-actual check then fires on a correct run.
+    created = sum(
+        result.cells_written for result in (entry for entry in _results) if result.sheets_created
+    )
+    changed += created
 
     return DryRunPreview(
         run_id="preview",

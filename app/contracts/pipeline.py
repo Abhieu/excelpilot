@@ -18,6 +18,7 @@ from app.contracts.enums import (
     RunState,
 )
 from app.contracts.operations import ReconcileSpec, WorkbookOperation
+from app.contracts.verification import ReconciliationResult
 
 # --------------------------------------------------------------------------
 # Task understanding
@@ -388,6 +389,21 @@ class ExecutionState(MutableContractModel):
     total_formulas_added: int = Field(default=0, ge=0)
     total_formulas_removed: int = Field(default=0, ge=0)
     errors: list[str] = Field(default_factory=list)
+    reconciliation_results: list[ReconciliationResult] = Field(
+        default_factory=list,
+        description=(
+            "Structured reconciliation outcomes computed during execution. Every "
+            "value is recomputed from cell data; none is a model judgement."
+        ),
+    )
+    removed_coordinates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Coordinates deleted by deliberate row removal, as 'Sheet!Row'. Lets the "
+            "verifier distinguish formulas destroyed by accident from formulas that "
+            "left because their row was intentionally deleted."
+        ),
+    )
 
     @property
     def applied(self) -> bool:
