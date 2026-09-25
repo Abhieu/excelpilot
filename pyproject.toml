@@ -97,6 +97,13 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG", "N802"]
 "app/cli/*" = ["T201"]  # CLI legitimately prints
+# The redirect handler's signature is fixed by urllib's HTTPRedirectHandler; the
+# unused parameters are part of the contract, not an oversight.
+"app/net/http.py" = ["ARG002"]
+# JevAdapter.decide(context) and build_questions(context) both take the context so
+# every adapter and question builder has the same shape. The mock adapter and the
+# question builder do not need to read it.
+"app/decisions/*" = ["ARG001", "ARG002"]
 # Every operation handler takes (workbook, operation, context) so the registry can
 # call them uniformly. Not every handler needs the context today; that is fine and
 # the signature stays stable as operations are added.

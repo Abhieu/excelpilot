@@ -210,18 +210,28 @@ def sanitise_name(name: str, *, fallback: str = "sheet") -> str:
     return cleaned[:60]
 
 
-def wrap_as_data(text: str, *, label: str = "untrusted_content") -> str:
-    """Wrap untrusted content in explicit data delimiters.
+#: Delimiter markers. Deliberately **non-overlapping**: an earlier version used
+#: an opening marker that contained the closing marker as a substring, which made
+#: "how many delimiters are in this prompt" ambiguous and delimiter-escaping
+#: fragile. Now a plain count is reliable.
+OPEN_MARKER = "<<<EXCELPILOT_UNTRUSTED_DATA"
+CLOSE_MARKER = "<<<END_EXCELPILOT_UNTRUSTED_DATA>>>"
 
-    Paired with a system instruction that says the delimited region is data to be
-    analysed, never instructions to follow. The delimiter is a fixed literal, and
-    any attempt by the content to close it is neutralised first.
+
+def wrap_as_data(text: str, *, label: str = "untrusted_content") -> str:
+    """Wrap untrusted content in explicit, non-overlapping data delimiters.
+
+    Paired with a system instruction saying the delimited region is data to be
+    analysed, never instructions to follow.
+
+    Any attempt by the content to emit either marker is neutralised first, so a
+    workbook cell cannot close the fence and have the rest of its text read as a
+    system instruction.
     """
-    fence = "<<<EXCELPILOT_UNTRUSTED"
-    end = "EXCELPILOT_UNTRUSTED>>>"
-    # Neutralise any attempt to emit the closing marker from inside the content.
-    safe = text.replace(end, end[:3] + "_").replace(fence, fence[:3] + "_")
-    return f"{fence}:{label}>>>\n{safe}\n{end}"
+    safe = text.replace(CLOSE_MARKER, "<END_UNTRUSTED_DATA_ESCAPED>").replace(
+        OPEN_MARKER, "<OPEN_UNTRUSTED_DATA_ESCAPED>"
+    )
+    return f"{OPEN_MARKER} label={label}>>>\n{safe}\n{CLOSE_MARKER}"
 
 
 def _preview(text: str, limit: int = 60) -> str:
@@ -231,8 +241,10 @@ def _preview(text: str, limit: int = 60) -> str:
 
 
 __all__ = [
+    "CLOSE_MARKER",
     "INJECTION_PATTERNS",
     "INVISIBLE_CHARS",
+    "OPEN_MARKER",
     "PROVENANCE_CAPS",
     "InjectionFinding",
     "ScanResult",
