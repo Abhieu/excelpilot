@@ -27,14 +27,27 @@ from app.contracts.verification import (
 from app.verification import anomalies as anomaly_checks
 from app.verification import formulas as formula_checks
 from app.verification import structural as structural_checks
+from app.verification.recalc import NullRecalculator, RecalcResult, Recalculator
 from app.workbook import opened
 
 
 class Verifier:
-    """Runs every check family and produces one verdict."""
+    """Runs every check family and produces one verdict.
 
-    def __init__(self, anomaly_config: AnomalyConfig | None = None) -> None:
+    A recalculator is optional. When one is available and it actually completes,
+    ``recalculated`` is True and the result is a genuinely stronger claim; when
+    not, ``recalculated`` is False and the static limits are stated. The flag is
+    never inferred from a library merely being installed.
+    """
+
+    def __init__(
+        self,
+        anomaly_config: AnomalyConfig | None = None,
+        *,
+        recalculator: Recalculator | None = None,
+    ) -> None:
         self.anomaly_config = anomaly_config or AnomalyConfig()
+        self.recalculator = recalculator if recalculator is not None else NullRecalculator()
 
     def verify(
         self,
@@ -74,6 +87,8 @@ class Verifier:
                 notes=["the output file does not exist"],
             )
 
+        recalc = self.recalculator.recalculate(output_path)
+
         try:
             return self._verify_open(
                 run_id,
@@ -89,6 +104,7 @@ class Verifier:
                 actual_cells_changed=actual_cells_changed,
                 output_hash=output_hash,
                 removed_rows=removed_rows,
+                recalc=recalc,
             )
         except ExcelPilotError as error:
             # The file passed the readability check but could not be analysed.
@@ -127,6 +143,7 @@ class Verifier:
         actual_cells_changed: int,
         output_hash: str | None,
         removed_rows: list[str] | None,
+        recalc: RecalcResult,
     ) -> VerificationResult:
         """Run the checks that need the workbook open.
 
@@ -197,6 +214,15 @@ class Verifier:
                     f"are unverified"
                 )
 
+        # Recalculation, when it actually happened, adds real evidence: a formula
+        # that evaluates to an error value is a defect static analysis cannot see.
+        if recalc.recalculated:
+            formula.extend(_recalculated_checks(recalc))
+        else:
+            notes.extend(recalc.notes)
+            if recalc.error:
+                notes.append(f"recalculation was attempted and did not complete: {recalc.error}")
+
         status = _overall_status(structural, data, formula, reconciliation)
         if status is VerificationStatus.PASSED and found_anomalies:
             errors = [a for a in found_anomalies if a.severity.value == "error"]
@@ -213,11 +239,46 @@ class Verifier:
             formula=formula,
             reconciliation=reconciliation,
             anomalies=found_anomalies,
-            recalculated=False,
-            static_formula_checks=True,
+            recalculated=recalc.recalculated,
+            static_formula_checks=not recalc.recalculated,
             output_hash=output_hash,
             notes=notes,
         )
+
+
+#: Excel error values. A formula that evaluates to one of these is broken in a
+#: way that static analysis cannot detect — only evaluation reveals it.
+_ERROR_PREFIXES = ("#REF!", "#NAME?", "#VALUE!", "#DIV/0!", "#N/A", "#NULL!", "#NUM!")
+
+
+def _recalculated_checks(recalc: RecalcResult) -> list[CheckResult]:
+    """Checks that are only possible once formulas have been evaluated."""
+    values = recalc.value_map()
+    errored: list[str] = []
+    for coordinate, value in values.items():
+        if isinstance(value, str) and value.startswith(_ERROR_PREFIXES):
+            errored.append(f"{coordinate} = {value}")
+    return [
+        CheckResult(
+            name="formula_recalculated",
+            status=VerificationStatus.PASSED,
+            message=(
+                f"{len(values):,} formula value(s) were evaluated with "
+                f"{recalc.library}; this is a real recalculation, not a static check"
+            ),
+            details={"library": recalc.library, "values": len(values)},
+        ),
+        CheckResult(
+            name="formula_evaluation_errors",
+            status=VerificationStatus.FAILED if errored else VerificationStatus.PASSED,
+            message=(
+                f"{len(errored)} formula(s) evaluate to an Excel error"
+                if errored
+                else "no formula evaluates to an Excel error"
+            ),
+            details={"errored": errored[:25], "count": len(errored)},
+        ),
+    ]
 
 
 def _parse_removed_rows(removed_rows: list[str] | None) -> set[tuple[str, int]]:

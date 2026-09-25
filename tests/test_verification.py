@@ -322,6 +322,101 @@ class TestFormulaChecks:
 # --------------------------------------------------------------------------
 
 
+class TestRecalculation:
+    """Formula recalculation: an optional capability whose claim is always honest.
+
+    The plan originally recorded recalculation as "not yet determined". It has
+    since been measured: ``formulas`` 1.3.4 correctly recalculates the benchmark
+    workbook including cross-sheet references, verified against ground truth
+    computed independently in Python. It ships as an optional extra because it
+    pulls in scipy, and because most runs never need to evaluate a formula.
+    """
+
+    def test_library_presence_is_reported(self) -> None:
+        from app.verification.recalc import library_available
+
+        assert isinstance(library_available(), bool)
+
+    def test_null_recalculator_reports_no_recalculation(self, tmp_path: Path) -> None:
+        from app.verification.recalc import NullRecalculator
+
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=8)
+        result = NullRecalculator().recalculate(path)
+        assert result.recalculated is False
+        assert result.available is False
+        assert any("static" in note for note in result.notes)
+
+    def test_missing_file_is_reported_not_raised(self, tmp_path: Path) -> None:
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("recalculation library not installed")
+        result = FormulaRecalculator().recalculate(tmp_path / "nope.xlsx")
+        assert result.recalculated is False
+        assert result.error
+
+    def test_size_limit_is_honoured(self, tmp_path: Path) -> None:
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("recalculation library not installed")
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=40)
+        result = FormulaRecalculator().recalculate(path, max_cells=1_000)
+        # 40 rows is under the limit, so this should still recalculate; the point
+        # is that a limit below the formula count is refused rather than ignored.
+        assert result.recalculated is True
+
+        tiny = FormulaRecalculator().recalculate(path, max_cells=5)
+        assert tiny.recalculated is False
+        assert any("limit" in note for note in tiny.notes)
+
+    def test_recalculated_values_are_real_numbers(self, tmp_path: Path) -> None:
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("recalculation library not installed")
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=8)
+        result = FormulaRecalculator().recalculate(path)
+        assert result.recalculated is True
+        value = result.get("Sales", "G2")
+        assert value is not None
+        # Must be a plain number, not a library object. An earlier version handed
+        # callers a `Ranges` instance because it called the `value` *property*.
+        assert isinstance(value, (int, float))
+
+    def test_verification_reports_recalculation_truthfully(self, tmp_path: Path) -> None:
+        from app.verification import Verifier
+        from app.verification.recalc import (
+            FormulaRecalculator,
+            NullRecalculator,
+            library_available,
+        )
+
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=8)
+
+        with_null = Verifier(recalculator=NullRecalculator()).verify("r", path)
+        assert with_null.recalculated is False
+        assert with_null.static_formula_checks is True
+        assert any("static" in note for note in with_null.notes)
+
+        if library_available():
+            with_recalc = Verifier(recalculator=FormulaRecalculator()).verify("r", path)
+            assert with_recalc.recalculated is True
+            assert with_recalc.static_formula_checks is False
+            names = {check.name for check in with_recalc.formula}
+            assert "formula_recalculated" in names
+            assert "formula_evaluation_errors" in names
+
+    def test_recalculated_flag_cannot_be_set_by_hand(self, tmp_path: Path) -> None:
+        """The field is validated: a caller cannot assert a recalculation."""
+        from pydantic import ValidationError
+
+        from app.contracts.verification import VerificationResult
+
+        with pytest.raises(ValidationError):
+            VerificationResult(run_id="r").recalculated = True  # type: ignore[misc]
+
+
 class TestVerifier:
     def test_passing_verification_of_a_no_op(self, tmp_path: Path) -> None:
         source = build("monthly_sales", tmp_path / "s.xlsx", rows=15)

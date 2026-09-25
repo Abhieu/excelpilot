@@ -142,6 +142,25 @@ class OutputConfig(ContractModel):
     neutralize_formula_injection: bool = True
 
 
+class VerificationConfig(ContractModel):
+    """Verification options.
+
+    ``enable_recalculation`` only ever *adds* evidence: when the optional
+    ``formulas`` library is installed, verification additionally evaluates the
+    workbook's formulas and reports a real recalculation. With it absent, checks
+    remain static and ``recalculated`` is False. Either way the result states
+    which happened.
+    """
+
+    enable_recalculation: bool = True
+    max_recalculation_cells: int = Field(
+        default=500_000,
+        ge=1_000,
+        description="Above this formula count, recalculation is skipped and the reason stated.",
+    )
+    recalculation_timeout_seconds: float = Field(default=120.0, gt=0, le=1_800)
+
+
 class AnomalyConfig(ContractModel):
     row_count_change_ratio: float = Field(default=0.10, ge=0, le=1)
     null_rate_increase: float = Field(default=0.05, ge=0, le=1)
@@ -163,6 +182,7 @@ class ExcelPilotConfig(ContractModel):
     reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     anomaly: AnomalyConfig = Field(default_factory=AnomalyConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
     allow_paid_calls: bool = Field(
         default=False,
         description="Master switch for live JEV/LLM calls. Also gated by --allow-paid-calls.",
@@ -227,4 +247,5 @@ __all__ = [
     "OutputConfig",
     "PolicyThresholds",
     "ReconciliationConfig",
+    "VerificationConfig",
 ]

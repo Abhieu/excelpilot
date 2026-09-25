@@ -62,6 +62,154 @@ def task(text: str) -> UntrustedText:
     return UntrustedText(text, provenance="user_task")
 
 
+def assert_recalculation_claim_is_honest(verification) -> None:  # noqa: ANN001
+    """``recalculated`` must match what actually happened, either way.
+
+    Asserting a fixed value here would be wrong in both directions: it would fail
+    on a machine with the optional ``formulas`` extra installed, and it would
+    assert ``False`` on one where it is not — which is exactly the kind of stale
+    claim this project exists to avoid. The invariant is the real requirement:
+
+    * ``recalculated is True`` only if a real recalculation check is present.
+    * ``recalculated is False`` only if the result says formulas were not evaluated.
+    """
+    if verification.recalculated:
+        names = {check.name for check in verification.formula}
+        assert "formula_recalculated" in names, (
+            "recalculated is claimed but no recalculation check was recorded"
+        )
+        assert verification.static_formula_checks is False
+    else:
+        assert verification.static_formula_checks is True
+        assert verification.notes, (
+            "without recalculation, the result must state that formula checks are static"
+        )
+
+
+class TestRecalculation:
+    """Recalculation is optional, and the claim tracks reality either way."""
+
+    def test_reports_recalculation_when_available(
+        self, source: Path, orchestrator: RunOrchestrator
+    ) -> None:
+        from app.verification.recalc import library_available
+
+        result = orchestrator.run(source, task(SAFE_TASK), approve=True)
+        assert result.verification is not None
+        assert_recalculation_claim_is_honest(result.verification)
+        if library_available():
+            assert result.verification.recalculated is True
+
+    def test_falls_back_to_static_when_disabled(
+        self, source: Path, config: ExcelPilotConfig
+    ) -> None:
+        disabled = config.model_copy(
+            update={
+                "verification": config.verification.model_copy(
+                    update={"enable_recalculation": False}
+                )
+            }
+        )
+        orchestrator = RunOrchestrator(disabled, jev=MockJevAdapter("approve"))
+        result = orchestrator.run(source, task(SAFE_TASK), approve=True)
+        assert result.verification is not None
+        assert result.verification.recalculated is False
+        assert result.verification.static_formula_checks is True
+        assert any("static" in note for note in result.verification.notes)
+
+    def test_null_recalculator_never_claims_recalculation(self, source: Path) -> None:
+        from app.verification import Verifier
+        from app.verification.recalc import NullRecalculator
+
+        verifier = Verifier(recalculator=NullRecalculator())
+        result = verifier.verify("run-x", source, before_path=source)
+        assert result.recalculated is False
+        assert result.static_formula_checks is True
+
+    def test_recalculated_values_match_independent_ground_truth(self, tmp_path: Path) -> None:
+        """Recalculation must agree with arithmetic done separately in Python."""
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("the optional recalculation library is not installed")
+
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=10)
+        # Ground truth computed from the data cells, not from any formula.
+        with opened(path) as workbook:
+            sheet = workbook["Sales"]
+            expected = {
+                row: sheet.cell(row=row, column=5).value * sheet.cell(row=row, column=6).value
+                for row in range(2, 12)
+            }
+
+        result = FormulaRecalculator().recalculate(path)
+        assert result.recalculated is True
+        for row, want in expected.items():
+            got = result.get("Sales", f"G{row}")
+            assert got is not None, f"G{row} was not recalculated"
+            assert abs(float(got) - float(want)) < 0.01, f"G{row}: {got} != {want}"
+
+    def test_recalculates_cross_sheet_references(self, tmp_path: Path) -> None:
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("the optional recalculation library is not installed")
+
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=10)
+        with opened(path) as workbook:
+            sales = workbook["Sales"]
+            total = sum(
+                sales.cell(row=row, column=5).value * sales.cell(row=row, column=6).value
+                for row in range(2, 12)
+            )
+        result = FormulaRecalculator().recalculate(path)
+        assert result.recalculated is True
+        got = result.get("Summary", "B3")
+        assert got is not None, "the cross-sheet total was not recalculated"
+        assert abs(float(got) - total) < 0.01
+
+    def test_a_broken_formula_is_reported_when_recalculated(self, tmp_path: Path) -> None:
+        """Evaluation reveals errors that static analysis cannot see."""
+        from app.verification import Verifier
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("the optional recalculation library is not installed")
+
+        path = build("formulas_only", tmp_path / "f.xlsx", rows=8)
+        with opened(path) as workbook:
+            workbook["Computed"]["C2"] = "=NOSUCHFUNCTION(1)"
+        damaged = tmp_path / "damaged.xlsx"
+        with opened(path) as workbook:
+            workbook["Computed"]["C2"] = "=NOSUCHFUNCTION(1)"
+            from app.workbook import save_atomic
+
+            save_atomic(workbook, damaged)
+
+        verifier = Verifier(recalculator=FormulaRecalculator())
+        result = verifier.verify("run-x", damaged)
+        # Either the recalculation failed (reported) or it ran and the error is
+        # caught. Both are honest; silently passing is not.
+        if result.recalculated:
+            names = {check.name for check in result.formula}
+            assert "formula_evaluation_errors" in names
+        else:
+            assert result.notes
+
+    def test_a_missing_external_reference_does_not_crash(self, tmp_path: Path) -> None:
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("the optional recalculation library is not installed")
+
+        path = build("formula_damage", tmp_path / "d.xlsx", rows=8)
+        result = FormulaRecalculator().recalculate(path)
+        # Must return a result either way, never raise.
+        assert isinstance(result.recalculated, bool)
+        if not result.recalculated:
+            assert result.error or result.notes
+
+
 class TestFullPipeline:
     def test_the_whole_flow(self, source: Path, orchestrator: RunOrchestrator) -> None:
         result = orchestrator.run(source, task(FULL_TASK), approve=True)
@@ -92,10 +240,10 @@ class TestFullPipeline:
         assert result.execution.applied is True
         assert result.execution.totals()["operations"] == 3
 
-        # Verification passed, and never claimed recalculation.
+        # Verification passed, and its recalculation claim is honest either way.
         assert result.verification is not None
         assert result.verification.passed is True
-        assert result.verification.recalculated is False
+        assert_recalculation_claim_is_honest(result.verification)
 
         # A versioned output exists, and the source is byte-identical.
         assert result.output_path is not None
@@ -475,7 +623,9 @@ class TestJsonContract:
         text = json.dumps(payload, default=str)
         restored = json.loads(text)
         assert restored["outcome"] == "succeeded"
-        assert restored["verification"]["recalculated"] is False
+        # The claim is whatever actually happened; the invariant is checked
+        # thoroughly in TestRecalculation.
+        assert isinstance(restored["verification"]["recalculated"], bool)
         assert restored["source"]["hash"]
         assert restored["jev"]["called"] is True
         assert restored["policy"]["outcome"] in {"allow", "require_approval"}

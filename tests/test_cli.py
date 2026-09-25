@@ -203,7 +203,7 @@ class TestRun:
         payload = json.loads(result.stdout)
         assert payload["command"] == "run"
         assert payload["outcome"] == "succeeded"
-        assert payload["verification"]["recalculated"] is False
+        assert isinstance(payload["verification"]["recalculated"], bool)
         assert payload["source"]["hash"]
         assert payload["output"]["hash"]
 

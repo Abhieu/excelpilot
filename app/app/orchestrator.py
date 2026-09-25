@@ -66,6 +66,7 @@ from app.planner import DeterministicPlanner, Planner
 from app.policy import PolicyEngine
 from app.safety import versioned_output
 from app.verification import Verifier
+from app.verification.recalc import FormulaRecalculator, NullRecalculator
 from app.workbook import file_sha256, inspect_workbook, opened, save_atomic
 
 
@@ -212,7 +213,16 @@ class RunOrchestrator:
         self.store = store or FileRunStore(self.config)
         self.policy = PolicyEngine(self.config)
         self.executor = Executor(self.config)
-        self.verifier = Verifier(self.config.anomaly)
+        # Recalculation is added evidence, never a requirement: with the optional
+        # library absent, verification falls back to static checks and says so.
+        recalculator = (
+            FormulaRecalculator(
+                timeout_seconds=self.config.verification.recalculation_timeout_seconds
+            )
+            if self.config.verification.enable_recalculation
+            else NullRecalculator()
+        )
+        self.verifier = Verifier(self.config.anomaly, recalculator=recalculator)
         # The deterministic planner is the default; no credential required.
         self.planner = planner or DeterministicPlanner()
         self.jev = jev or self._default_jev()
