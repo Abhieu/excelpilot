@@ -248,17 +248,27 @@ class TestPaidCallsAreGated:
             assert main(["--output", str(output), "--only", "nothing"]) == 0
         assert json.loads(output.read_text())["live_jev"]["called"] is False
 
-    def test_the_probe_requires_explicit_opt_in(self) -> None:
+    def test_the_probe_requires_explicit_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An unauthorised paid call aborts loudly.
 
         It does not return ``jev_called=False``. A guard that quietly reports
         "not called" is indistinguishable from one that fired on a run where no
         call was ever needed, which is exactly the ambiguity worth eliminating.
+
+        The credential is set here rather than assumed. Without a key the adapter
+        returns early — "not set", ``jev_called: False`` — because there is
+        nothing to spend, so the ``PaidCallBlocked`` branch is never reached. This
+        test originally relied on the developer's environment having a key, and so
+        passed locally while failing in CI, where no credential exists by design.
+        A test whose result depends on ambient state is not a test.
         """
         from app.contracts.config import ExcelPilotConfig
         from app.contracts.errors import PaidCallBlocked
         from app.contracts.pipeline import DecisionContext
         from app.decisions import HttpJevAdapter
+
+        monkeypatch.setenv("TYPESAFE_API_KEY", "present-but-never-used")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "present-but-never-used")
 
         guarded = HttpJevAdapter(ExcelPilotConfig().jev, allow_paid_calls=False)
         with pytest.raises(PaidCallBlocked):
@@ -273,6 +283,56 @@ class TestPaidCallsAreGated:
                     operation_kinds=["set_value"],
                 )
             )
+
+    def test_without_a_credential_it_reports_not_set_rather_than_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The branch CI exercises, and the one that made the test above fragile.
+
+        With no key there is no paid call to block, so the adapter returns a
+        decision set saying so. Raising here would be wrong: there was nothing
+        to authorise.
+
+        Two distinct no-credential paths exist, and both are pinned because
+        they say different things. With no key at all, provider resolution yields
+        ``disabled``. With a provider configured explicitly but that provider's
+        key missing, the adapter names the variable it wanted.
+        """
+        from app.contracts.config import ExcelPilotConfig
+        from app.contracts.pipeline import DecisionContext
+        from app.decisions import HttpJevAdapter
+
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        context = DecisionContext(
+            run_id="test",
+            task_summary="t",
+            sheet_count=1,
+            sheets_affected=["S"],
+            total_rows=1,
+            cells_to_change=1,
+            operation_kinds=["set_value"],
+        )
+
+        # No credential at all: nothing is configured to spend.
+        no_key = HttpJevAdapter(ExcelPilotConfig().jev, allow_paid_calls=False)
+        result = no_key.decide(context)
+        assert result.jev_called is False
+        assert result.error is not None
+        assert "no credential present" in result.error
+
+        # A provider is configured, but its key is absent. The adapter names the
+        # variable rather than failing vaguely, which is what makes a support
+        # question answerable.
+        named = HttpJevAdapter(
+            ExcelPilotConfig.model_validate({"jev": {"provider": "typesafe", "enabled": True}}).jev,
+            allow_paid_calls=False,
+        )
+        missing = named.decide(context)
+        assert missing.jev_called is False
+        assert missing.error is not None
+        assert "TYPESAFE_API_KEY" in missing.error and "is not set" in missing.error
 
     def test_live_probe_is_never_entered_by_import(self) -> None:
         """Importing the harness must not be capable of spending money."""
