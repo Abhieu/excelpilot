@@ -142,9 +142,9 @@ recorded live call is never discarded by a routine re-run.
 |---|---:|---|
 | Default | **581 passed**, 1 skipped, 49 deselected | `make test` |
 | Pre-commit gate | 547 passed, 1 skipped, 83 deselected | `make check` |
-| Security boundary | 99 passed | `make test-security` |
+| Security boundary | 100 passed | `make test-security` |
 | End-to-end | 34 passed | `make test-e2e` |
-| Benchmark harness | 35 passed | `uv run pytest -m benchmark` |
+| Benchmark harness | 36 passed | `uv run pytest -m benchmark` |
 | Slow, real workbooks | 13 passed in 275 s | `make test-slow` |
 | Ruff | clean, 78 files | `make lint` |
 | mypy (strict) | clean, 58 source files | `make typecheck` |

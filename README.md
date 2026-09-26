@@ -237,10 +237,10 @@ The full record is in [`docs/benchmarks.md`](docs/benchmarks.md) and
 | Skipped | 1 | |
 | Ruff | clean, 78 files | `make lint` |
 | mypy (strict) | clean, 58 source files | `make typecheck` |
-| Security boundary tests | 99 | `make test-security` |
+| Security boundary tests | 100 | `make test-security` |
 | End-to-end tests | 34 | `make test-e2e` |
 | Slow real-workbook tests | 13, in 275 s | `make test-slow` |
-| Benchmark harness tests | 35 | `uv run pytest -m benchmark` |
+| Benchmark harness tests | 36 | `uv run pytest -m benchmark` |
 | Pre-commit gate | 547 passed | `make check` |
 
 ### Benchmark

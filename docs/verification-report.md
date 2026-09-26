@@ -16,9 +16,9 @@ Every command below was executed. Results are quoted, not summarised from memory
 | `make typecheck` | `Success: no issues found in 58 source files` |
 | `make test` | **581 passed**, 1 skipped, 49 deselected (31.75 s) |
 | `make check` | 547 passed, 1 skipped, 83 deselected (38.25 s) |
-| `make test-security` | **99 passed** (9.81 s) |
+| `make test-security` | **100 passed** |
 | `make test-e2e` | **34 passed** (4.65 s) |
-| `uv run pytest -m benchmark` | **35 passed** |
+| `uv run pytest -m benchmark` | **36 passed** |
 | `make test-slow` | **13 passed** (274.88 s) |
 | `make smoke` | exit 0 |
 

@@ -118,5 +118,21 @@ real and each now has a regression test.
 - **`defusedxml` appeared unused** — it is loaded by openpyxl, not by ExcelPilot,
   and every OOXML parse depends on it. Verified rather than removed.
 
+Found by the project's own CI, after the baseline was published:
+
+- **The paid-call gate test depended on ambient credentials.** It asserted that an
+  unauthorised call raises `PaidCallBlocked`, but the adapter returns early when
+  no credential is present — there is nothing to block. The test therefore only
+  passed on a machine whose environment happened to have a key set, and failed in
+  CI, where no credential exists by design. It now sets a dummy key to exercise
+  the branch it is about, and a companion test pins the no-credential path.
+- **The CI workflow failed before running any test.** `cache: uv` on
+  `setup-python` requires an already-installed uv, but uv is installed by the
+  next step, so the job died in ten seconds with "Caching for 'uv' is not
+  supported". `setup-uv` does the caching itself.
+
+Both were configuration and test-hygiene faults, not application defects. No
+test, threshold, or gate was weakened to obtain a green status.
+
 [Unreleased]: https://github.com/Abhieu/excelpilot/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Abhieu/excelpilot/releases/tag/v0.1.0
