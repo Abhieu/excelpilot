@@ -112,6 +112,7 @@ class TestContractsAreTheBase:
         assert offenders == [], f"contracts must not perform I/O: {offenders}"
 
 
+@pytest.mark.security
 class TestLayerBoundaries:
     @pytest.mark.parametrize(
         ("package", "forbidden", "reason"),
@@ -162,6 +163,7 @@ class TestLayerBoundaries:
                     assert other not in text, f"{path.relative_to(APP_ROOT)} composes {other}"
 
 
+@pytest.mark.security
 class TestNoDynamicExecution:
     """No eval/exec/compile anywhere: arbitrary code execution is not implemented (spec section 24)."""
 
@@ -236,6 +238,7 @@ class TestNoDynamicExecution:
         assert offenders == [], f"builtins reached dynamically: {offenders}"
 
 
+@pytest.mark.security
 class TestNoSubprocessToExternalServices:
     """The executor must not shell out. Network lives in app/net only."""
 
@@ -272,3 +275,75 @@ class TestNoPrintInLibraryCode:
                     ):
                         offenders.append(f"{path.relative_to(APP_ROOT)}:{node.lineno}")
         assert offenders == [], f"print() in library code: {offenders}"
+
+
+class TestMarkerTargetsSelectTests:
+    """A test-selection target that matches nothing is a false pass.
+
+    ``make test-security`` declared a ``security`` marker in ``pyproject.toml``
+    and applied it to no test, so the target selected zero tests and exited 5 —
+    which reads as "security checks ran and something failed" rather than
+    "security checks never ran". Both readings are wrong, and the second is
+    worse, because it looks like coverage.
+
+    The test asserts each marker selects a non-trivial number of tests, by
+    reading pytest's own collection rather than by trusting the config.
+    """
+
+    #: Marker -> a floor well below the real count, so adding tests does not
+    #: break this and removing them does.
+    MARKERS: dict[str, int] = {
+        "security": 20,
+        "e2e": 20,
+        "slow": 3,
+        "benchmark": 10,
+    }
+
+    def _collected(self, marker: str) -> int:
+        import subprocess
+        import sys
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-m",
+                marker,
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parent.parent,
+            timeout=300,
+        )
+        tail = completed.stdout.strip().splitlines()[-1]
+        # `pytest --collect-only -q` prints one "<file>: <count>" line per file
+        # under this configuration, not a single total, so the counts are summed.
+        # Summing is what makes an unselected marker read as 0 rather than
+        # silently picking up whichever number happened to be last.
+        total = 0
+        matched_any = False
+        for line in completed.stdout.splitlines():
+            head, _, count = line.rpartition(":")
+            if head.endswith(".py") and count.strip().isdigit():
+                total += int(count.strip())
+                matched_any = True
+        if matched_any:
+            return total
+        # Fall back to a summary line such as "81 tests collected in 3.2s".
+        for token in tail.replace(",", " ").split():
+            if token.isdigit():
+                return int(token)
+        return 0
+
+    @pytest.mark.parametrize("marker,floor", sorted(MARKERS.items()))
+    def test_marker_selects_a_non_trivial_number_of_tests(self, marker: str, floor: int) -> None:
+        collected = self._collected(marker)
+        assert collected >= floor, (
+            f"marker {marker!r} selects only {collected} test(s); expected at least "
+            f"{floor}. A target that silently selects nothing is a false pass."
+        )

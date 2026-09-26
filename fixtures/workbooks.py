@@ -1,9 +1,10 @@
 """Workbook fixtures: small, purpose-built, and generated.
 
-Real workbooks are used for fidelity testing (they live outside the repo under
-``Excel Automation/Airtel Internship Macros/``). These synthetic fixtures exist so
-the test suite is self-contained and so specific conditions — hidden sheets,
-macros, formula breakage, injection payloads — can be created deliberately.
+Real workbooks are used for fidelity testing. They are **not** in this
+repository — they are somebody's business data — and are located at test time
+through :mod:`fixtures.real`. These synthetic fixtures exist so the test suite is
+self-contained and so specific conditions — hidden sheets, macros, formula
+breakage, injection payloads — can be created deliberately.
 
 Generated workbooks are gitignored; committed ones are tiny and reviewable.
 """

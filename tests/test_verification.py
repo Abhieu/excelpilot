@@ -589,6 +589,7 @@ class TestVerifier:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.security
 class TestRedaction:
     def test_registered_secret_is_masked(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TYPESAFE_API_KEY", "tsk-supersecretvalue12345")
@@ -845,3 +846,50 @@ class TestFileRunStore:
         record = store.record_output(artefact)
         assert record["hash"] == file_sha256(artefact)
         assert record["size_bytes"] == 7
+
+
+class TestThirdPartyNoiseIsSuppressed:
+    """The recalculation library must not write to stderr during a run.
+
+    Found by running the benchmark: ``formulas`` draws tqdm progress bars and
+    prints scheduler warnings straight to stderr. That corrupts ``--json``
+    consumers that merge the two streams, and it buries the report an operator
+    is trying to read.
+    """
+
+    def test_recalculation_writes_nothing_to_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from fixtures.workbooks import build
+
+        from app.verification.recalc import FormulaRecalculator, library_available
+
+        if not library_available():
+            pytest.skip("recalculation extra not installed")
+
+        path = build("monthly_sales", tmp_path / "s.xlsx", rows=12)
+        capsys.readouterr()  # discard anything the build emitted
+        result = FormulaRecalculator().recalculate(path)
+        captured = capsys.readouterr()
+
+        assert result.recalculated is True
+        assert captured.err == "", f"recalculation leaked to stderr: {captured.err[:200]}"
+
+    def test_muting_never_swallows_our_own_output(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The block is narrow: anything written outside it must still appear.
+
+        ``redirect_stderr`` rebinds ``sys.stderr``, which is what ``tqdm`` and the
+        ``formulas`` scheduler resolve at write time. ``print`` writes to stdout
+        and is deliberately unaffected, so the test writes to stderr explicitly
+        in order to exercise the same path the library uses.
+        """
+        import sys
+
+        from app.verification.recalc import _muted_stderr
+
+        with _muted_stderr():
+            print("this is the library's problem", file=sys.stderr)
+        print("this is ours", file=sys.stderr)
+        captured = capsys.readouterr()
+        assert "library's problem" not in captured.err
+        assert "this is ours" in captured.err

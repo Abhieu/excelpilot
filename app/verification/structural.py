@@ -318,8 +318,100 @@ def check_workbook_opens(path: Path) -> CheckResult:
     )
 
 
+#: Parts openpyxl legitimately does not re-emit, and whose loss costs the user
+#: nothing. Both are *caches* that Excel rebuilds on open; the values they held
+#: are stored in the sheet XML and are verified to be exact by the data checks.
+#:
+#: This allowlist is measured, not assumed. Across every synthetic fixture
+#: openpyxl drops nothing at all; the losses below appear only on workbooks Excel
+#: itself produced. Measured on real workbooks during the release audit:
+#:
+#:   xl/sharedStrings.xml  — the shared-string cache
+#:   xl/calcChain.xml      — the calculation-order cache
+#:
+#: Anything else that disappears is user content, and is reported as a failure.
+BENIGN_DROPPED_PARTS: frozenset[str] = frozenset({"xl/sharedStrings.xml", "xl/calcChain.xml"})
+
+
+def check_no_parts_lost(before_path: Path, after_path: Path) -> CheckResult:
+    """Confirm the output did not silently lose workbook content.
+
+    openpyxl does not round-trip every OOXML part. Measured on real workbooks, a
+    plain read/save drops cell **comments**, **drawings** (including shapes bound
+    to a macro), and the VML drawing that anchors legacy comments. Those losses
+    are invisible to a cell-level diff and to every other structural check, so a
+    run could report ``passed`` while having permanently removed a user's
+    comments.
+
+    This is a *name-set* comparison, not an OOXML diff: it asks which parts are
+    present before and absent after, and nothing more. That is deliberately the
+    smallest mechanism that makes the verdict honest — it does not attempt to
+    merge, repair, or understand the parts it finds.
+
+    Benign cache parts are excluded, because failing every run over
+    ``sharedStrings.xml`` would make the check useless rather than useful.
+
+    Requires ``before_path``; without a reference there is nothing to compare
+    against, and the result says so rather than implying an all-clear.
+    """
+    import zipfile
+
+    if before_path is None or not Path(before_path).exists():
+        return CheckResult(
+            name="ooxml_parts_preserved",
+            status=VerificationStatus.PASSED,
+            message=(
+                "no source reference was supplied, so lost OOXML parts could not be "
+                "detected; this is not an all-clear"
+            ),
+            details={"checked": False},
+        )
+
+    def names(path: Path) -> set[str]:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                return set(archive.namelist())
+        except (OSError, zipfile.BadZipFile):
+            return set()
+
+    before = names(Path(before_path))
+    after = names(Path(after_path))
+    lost = sorted(before - after - BENIGN_DROPPED_PARTS)
+
+    if not lost:
+        return CheckResult(
+            name="ooxml_parts_preserved",
+            status=VerificationStatus.PASSED,
+            message=(
+                "every workbook part survived the change, apart from the shared-string "
+                "and calculation-order caches, which Excel rebuilds"
+            ),
+            details={
+                "checked": True,
+                "parts_before": len(before),
+                "parts_after": len(after),
+                "benign_caches_absent": sorted((before - after) & BENIGN_DROPPED_PARTS),
+            },
+        )
+
+    return CheckResult(
+        name="ooxml_parts_preserved",
+        status=VerificationStatus.FAILED,
+        message=(
+            f"{len(lost)} workbook part(s) present in the source are absent from the "
+            f"output and openpyxl does not preserve them: {', '.join(lost)}. This is "
+            "content loss that a cell-level diff cannot see, most commonly cell "
+            "comments and drawings. The source workbook is unmodified, so nothing is "
+            "lost until this output is used; discard it."
+        ),
+        details={"checked": True, "lost_parts": lost, "parts_before": len(before)},
+    )
+
+
 __all__ = [
+    "BENIGN_DROPPED_PARTS",
     "check_data",
+    "check_no_parts_lost",
     "check_structure",
     "check_workbook_opens",
 ]

@@ -1,11 +1,12 @@
-"""Formula verification — **static only**.
+"""Static formula verification.
 
-ExcelPilot cannot recalculate Excel formulas. openpyxl reads a formula as a
-string; with ``data_only=True`` it returns whatever value Excel last cached,
+These checks read a workbook's formulas **as text** and reason about their
+structure. They never trust a cached value: openpyxl returns a formula as a
+string, and with ``data_only=True`` returns whatever value Excel last cached —
 which may be stale, absent, or wrong. Trusting those values would be exactly the
 "the totals look correct" claim the specification forbids (ADR-0011).
 
-So these checks are static, and every result says so:
+The checks:
 
 * **presence** — a column expected to hold formulas still does
 * **pattern consistency** — formulas in one column follow one pattern
@@ -14,9 +15,17 @@ So these checks are static, and every result says so:
 * **hard-coded replacement** — a formula replaced by a literal
 * **deletion** — formulas that were there and are now gone
 
-Every ``VerificationResult`` carries ``recalculated: False`` and
-``static_formula_checks: True``. Nothing here ever claims a formula was
-evaluated.
+This module is always run. Whether it is the *only* formula checking that
+happens is a separate question, answered by ``app.verification.recalc``: when the
+optional ``recalc`` extra is installed, the workbook is also evaluated, and the
+result carries ``recalculated: True`` with ``static_formula_checks: False``.
+
+The two are complementary. Static analysis catches structural mistakes that
+evaluation would happily accept — a formula replaced by the number it happened to
+evaluate to, a column deleted along with its formulas. Evaluation catches
+arithmetic and reference failures that static analysis cannot see. The result
+states which of them ran, so a static-only verdict is never presented as though
+it were an evaluated one.
 """
 
 from __future__ import annotations

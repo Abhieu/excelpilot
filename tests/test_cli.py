@@ -282,11 +282,46 @@ class TestDiff:
 
 class TestVerify:
     def test_passes_for_an_untouched_workbook(self, workbook: Path, tmp_path: Path) -> None:
+        from app.verification.recalc import library_available
+
         result = run_cli("verify", str(workbook), "--json", cwd=tmp_path)
         assert result.returncode == Exit.SUCCESS
         payload = json.loads(result.stdout)
         assert payload["passed"] is True
-        assert payload["recalculated"] is False
+        # Asserted against the real capability rather than a hard-coded False,
+        # which is what let the verify-command bug go unnoticed.
+        assert payload["recalculated"] is library_available()
+
+    def test_honours_the_configured_recalculation_setting(
+        self, workbook: Path, tmp_path: Path
+    ) -> None:
+        """``verify`` must be no weaker than the run it is checking.
+
+        Found by running the documented commands: ``excelpilot verify`` reported
+        ``recalculated: false`` on a workbook that the run itself had just
+        recalculated successfully, because the command built a bare ``Verifier``
+        and ignored ``verification.enable_recalculation``. A standalone check
+        that under-reports is worse than one that does not run — it tells the
+        operator the deployment cannot do something it can.
+        """
+        from app.verification.recalc import library_available
+
+        result = run_cli("verify", str(workbook), "--json", cwd=tmp_path)
+        payload = json.loads(result.stdout)
+        assert payload["recalculated"] is library_available(), (
+            "verify ignored the configured recalculation setting"
+        )
+        assert payload["static_formula_checks"] is (not library_available())
+
+    def test_accepts_a_config_file_like_every_other_command(
+        self, workbook: Path, tmp_path: Path
+    ) -> None:
+        """``verify`` was the only command without ``--config``."""
+        config = tmp_path / "ep.toml"
+        config.write_text("[verification]\nenable_recalculation = false\n", encoding="utf-8")
+        result = run_cli("verify", str(workbook), "--config", str(config), "--json", cwd=tmp_path)
+        assert result.returncode == Exit.SUCCESS
+        assert json.loads(result.stdout)["recalculated"] is False
 
     def test_fails_for_an_unreadable_file(self, workbook: Path, tmp_path: Path) -> None:
         broken = tmp_path / "broken.xlsx"
@@ -475,6 +510,57 @@ class TestExitCodeMapping:
             ),
         )
         assert for_result(result) == Exit.SUCCESS
+
+    def test_a_missing_workbook_is_a_usage_error_not_not_found(self, tmp_path: Path) -> None:
+        """Exit 7 means an unknown *run id*; a bad path argument is exit 2.
+
+        Asserted because ``docs/cli.md`` documents this split, and the
+        distinction is the kind of thing a well-meaning refactor would flatten:
+        a script branching on 7 to mean "file missing" would silently stop
+        working.
+        """
+        result = run_cli("inspect", str(tmp_path / "nope.xlsx"), cwd=tmp_path)
+        assert result.returncode == Exit.USAGE
+        assert result.returncode != Exit.NOT_FOUND
+
+    def test_an_unreadable_workbook_is_also_a_usage_error(self, tmp_path: Path) -> None:
+        broken = tmp_path / "broken.xlsx"
+        broken.write_bytes(b"this is not a workbook")
+        result = run_cli("inspect", str(broken), cwd=tmp_path)
+        assert result.returncode == Exit.USAGE
+
+    def test_a_policy_denial_at_execution_time_reports_one_but_records_the_rule(
+        self, workbook: Path, tmp_path: Path
+    ) -> None:
+        """The two-exit-code split, and the attribution that makes it usable.
+
+        The executor re-checks policy as defence in depth, so a denial there is
+        a *failed run* (exit 1), not a planning-stage refusal (exit 3). A script
+        that only reads the exit code cannot tell a security stop from an
+        incidental failure — which is why the rule id has to be in the payload.
+
+        The output path must be genuinely outside the workspace. ``run_cli`` runs
+        with ``cwd=tmp_path``, so the workspace root *is* ``tmp_path``; a path
+        under it would be legitimately allowed and the run would succeed.
+        """
+        outside = tmp_path.parent / "outside-the-workspace.xlsx"
+        result = run_cli(
+            "run",
+            str(workbook),
+            "-t",
+            "normalise the Customer column",
+            "--approve",
+            "-o",
+            str(outside),
+            "--json",
+            cwd=tmp_path,
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == Exit.INTERNAL_ERROR
+        assert payload["policy"]["outcome"] == "deny"
+        assert "output_within_workspace" in payload["policy"]["rule_ids"]
+        assert payload["output"]["path"] is None
+        assert not outside.exists(), "a denied run must not have written the file"
 
 
 class TestNoUnsafeFlags:

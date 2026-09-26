@@ -33,6 +33,7 @@ from app.contracts.config import ExcelPilotConfig
 from app.contracts.enums import (
     Actor,
     ApprovalStatus,
+    PolicyOutcome,
     RunOutcome,
     RunState,
 )
@@ -65,7 +66,7 @@ from app.executor import ExecutionError, Executor, preview_plan, verification_pl
 from app.planner import DeterministicPlanner, Planner
 from app.policy import PolicyEngine
 from app.safety import versioned_output
-from app.verification import Verifier
+from app.verification import Verifier, recalc
 from app.verification.recalc import FormulaRecalculator, NullRecalculator
 from app.workbook import file_sha256, inspect_workbook, opened, save_atomic
 
@@ -835,10 +836,38 @@ class RunOrchestrator:
                 )
             except ExecutionError as error:
                 execution = error.state
+                # A guard denial happened at execution time, after the planning
+                # pass had already recorded its own rule ids. Merge them in, so
+                # the run record attributes the refusal to the control that
+                # actually stopped it rather than leaving `policy_rule_ids`
+                # empty for what was a hard-deny security event.
+                denied_at_execution: list[str] = []
+                for result in execution.operations:
+                    for rule_id in result.details.get("denied_by_rules", []) or []:
+                        if rule_id not in denied_at_execution:
+                            denied_at_execution.append(rule_id)
+                if denied_at_execution:
+                    record = record.model_copy(
+                        update={
+                            "policy_rule_ids": [
+                                *record.policy_rule_ids,
+                                *[
+                                    r
+                                    for r in denied_at_execution
+                                    if r not in record.policy_rule_ids
+                                ],
+                            ],
+                            "policy_outcome": PolicyOutcome.DENY,
+                        }
+                    )
                 audit.emit(
                     Actor.SYSTEM,
                     EventType.EXECUTION_FAILED,
-                    {"run_id": identifier, "errors": execution.errors},
+                    {
+                        "run_id": identifier,
+                        "errors": execution.errors,
+                        **({"denied_by_rules": denied_at_execution} if denied_at_execution else {}),
+                    },
                 )
                 # The snapshot is not saved, so nothing partial is written.
                 return self._finish(
@@ -1066,10 +1095,16 @@ class RunOrchestrator:
     def _reconciliation(self, *, workbook_execution: ExecutionState) -> ReconciliationReport | None:
         """Collect reconciliation results produced during execution.
 
-        Built from what the executor recorded. ``recalculated`` is always False:
-        ExcelPilot cannot evaluate Excel formulas, so a reconciliation over
-        formula-derived columns is reported as a warning with that stated
-        explicitly (ADR-0011).
+        Built from what the executor recorded. Reconciliation happens *during*
+        execution, against an in-memory workbook, so it reads whatever values
+        openpyxl last cached. That is not a recalculation: a total over formula
+        cells is reported as ``derived_from_formula_cells`` and downgraded to a
+        warning rather than presented as a verified pass (ADR-0011).
+
+        Genuine evaluation happens afterwards, in verification, via
+        ``app.verification.recalc``. The two stay deliberately distinct — this
+        report describes what execution observed, the verification result
+        describes what evaluation proved.
         """
         results = list(workbook_execution.reconciliation_results)
         if not results:
@@ -1194,6 +1229,9 @@ def _decision_context(plan: ExecutionPlan, inspection: Any) -> DecisionContext:
         hidden_sheets_present=inspection.hidden_sheet_count > 0,
         ambiguity_signals=list(plan.understanding.missing_information),
         operation_kinds=plan.operation_kinds,
+        # What this deployment can actually do, measured at ask time rather than
+        # assumed. The JEV verification question is worded from this.
+        recalculation_available=recalc.library_available(),
     )
 
 

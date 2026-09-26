@@ -5,7 +5,7 @@
 > established by running a command; everything else is a plan, not a result.
 
 - **Project:** ExcelPilot — AI Excel Operations Engine
-- **Status:** Phase 8 — Benchmarks (in progress)
+- **Status:** Phase 10 — Final verification and documentation (complete)
 - **Last updated:** 2026-09-25
 
 ---
@@ -22,7 +22,7 @@ workspace. No assumption was carried forward unverified.
 | ExcelPilot did not exist; greenfield | No `.git` at `My Projects/`; no `ExcelPilot/` before this work |
 | Nearest sibling project is `Excel Automation/AirtelGLAutomation` | Python 3.10+, setuptools, pydantic v2, openpyxl, pytest, ruff; `app/` layout, `Makefile`, `IMPLEMENTATION_PLAN.md`, 52 modules, 31 test files |
 | Existing conventions to match | `pyproject.toml` + `[tool.ruff]` + `[tool.pytest.ini_options]`, `app/` package, `tests/`, `Makefile` targets `install/test/test-fast/lint/clean` |
-| Real Excel fixtures available | 24 `.xlsx`/`.xlsm` files under `Excel Automation/Airtel Internship Macros/`, incl. one 37,883×120 sheet and workbooks with 16 defined names, `veryHidden` sheets, and 826 formulas |
+| Real Excel fixtures available | A collection of 24 `.xlsx`/`.xlsm` files outside this repository, incl. one 37,883×120 sheet and workbooks with 16 defined names, `veryHidden` sheets, and 826 formulas. Supplied to the suite at test time via `fixtures/real.py`; see §7.4 |
 
 ### 1.2 Runtime
 
@@ -66,7 +66,9 @@ workspace. No assumption was carried forward unverified.
 
 - **VERIFIED:** `formulas` 1.3.4 and `pycel` 1.0b30 both *resolve* on CPython 3.14 via `uv pip install --dry-run`. `formulas` pulls scipy 1.18.1 + schedula; `pycel` needs only 3 packages.
 - **CORRECTION:** an earlier inference from their trove classifiers (both stop at 3.9) was wrong. Resolution is not function.
-- **VERIFIED (Phase 6):** neither library successfully recalculates ExcelPilot's benchmark workbook. See §7.2.
+- **VERIFIED (Phase 6):** `formulas` 1.3.4 recalculates correctly and is
+  integrated as the optional `recalc` extra. `pycel` 1.0b30 was rejected — wrong
+  API surface. See §7.2 item 1.
 
 ### 1.6 JEV — mandatory investigation
 
@@ -193,9 +195,9 @@ Forbidden and tested-for:
 | 5 | Planner, JEV adapter, policy | COMPLETE | 36 policy + 47 planner + 46 JEV tests. Real `jev.py --dry-run` accepted our request (3 contract-drift tests) |
 | 6 | Diff, verification, audit, storage | COMPLETE | 63 tests: `pytest tests/test_verification.py` |
 | 7 | CLI | COMPLETE | 45 CLI tests. `pytest tests/test_cli.py`. Exit codes 0-7 verified as subprocesses |
-| 8 | Benchmarks (incl. the one consented live JEV call) | IN PROGRESS | — |
-| 9 | Documentation + ADRs | NOT STARTED | — |
-| 10 | Full verification + report | NOT STARTED | — |
+| 8 | Benchmarks + the one consented live JEV call | COMPLETE | 165 runs, 11 scenarios × 3 modes × 5 repeats. All 55 expectations and 35 checks met per mode; source unmodified in all 165. One live JEV call, isolated under `live_jev` |
+| 9 | Documentation | COMPLETE | `README.md` + 8 documents in `docs/`; every command run before being documented |
+| 10 | Full verification + report | COMPLETE | `docs/verification-report.md` |
 
 ---
 
@@ -225,9 +227,9 @@ See `docs/limitations.md` for the authoritative list of what is *not* supported.
 
 | Risk | Likelihood | Impact | Mitigation | Residual |
 |---|---|---|---|---|
-| LLM path unexercised (no key) | certain | medium | Deterministic planner is the default; LLM adapter contract-tested | Open — report honestly |
-| No real formula recalculation | unknown — untested | medium | Strongest available static + reference-graph verification; explicitly never called "recalculated" | Open — resolved in Phase 6 |
-| VBA preservation unverified against real macros | **occurred** (no fixture has `vbaProject.bin`) | medium | Build a synthetic macro fixture; enforce `keep_vba=True` | Partly open |
+| LLM path unexercised (no key) | certain | medium | Deterministic planner is the default; LLM adapter contract-tested | **Open** — never run live; reported in `docs/limitations.md` §2 |
+| Formula recalculation fidelity | medium | medium | `formulas` 1.3.4 verified against Python ground truth; optional extra; failures surface as errors, never as wrong numbers; result always states which kind of claim it makes | **Partly open** — subset of Excel's functions; see `docs/limitations.md` §1 |
+| VBA preservation unverified against real macros | **occurred** (no fixture has `vbaProject.bin`) | medium | Build a synthetic macro fixture; enforce `keep_vba=True`; `vba_read_only` hard deny blocks any write | **Partly open** — read path untested against real VBA; write path is denied |
 | Malicious workbook | medium | high | Size/ratio/cell limits, hardened XML, timeouts, sandboxed paths | Security tests |
 | Prompt injection via cells | high | high | `UntrustedText` + firewall + tests | Security tests |
 | Policy bypass via crafted plan | medium | high | Executor re-validates and re-checks policy; typed discriminated union rejects unknown ops | Security tests |
@@ -248,9 +250,14 @@ See `docs/limitations.md` for the authoritative list of what is *not* supported.
 
 ### 7.2 Known limitations carried into release
 
-1. Formula recalculation status is **not yet determined** — Phase 6 must test
-   `pycel` and `formulas` functionally. Until then no claim about recalculation
-   may appear anywhere in this project.
+1. **SUPERSEDED (Phase 6).** Recalculation was undetermined here. It is now
+   **integrated and measured**: the `recalc` extra installs `formulas` 1.3.4,
+   which was verified against Python ground truth (`Sales!G2..G4` and
+   cross-sheet `Summary!B2..B4` matched exactly). `recalculated` is True only
+   when a recalculation actually completed for that file; otherwise
+   `static_formula_checks` is True and the result says so. `pycel` 1.0b30 was
+   rejected — wrong API surface. See `docs/limitations.md` §1 for the
+   constraints that remain.
 2. VBA authoring impossible. `.xlsm` is read/preserve only. No real-world macro
    workbook exists in the fixture set. A **synthetic** macro fixture (an xlsx
    re-saved as `.xlsm` with an injected `xl/vbaProject.bin`) is used to verify
@@ -262,9 +269,45 @@ See `docs/limitations.md` for the authoritative list of what is *not* supported.
    unaffected.
 4. The LLM planning path is implemented and contract-tested but was never run
    against a live provider.
-5. No live JEV call has been made. One is planned for Phase 8, with user
-   consent, and its measured result will be recorded in
-   `benchmarks/results.json`. Until then, no result may be attributed to JEV.
+5. **RESOLVED (Phase 8).** One live JEV call was made with explicit consent
+   via `--allow-paid-calls`: TypeSafe, model `jev-1.13.0`, 1.404 s, four
+   decisions, no error. It is an integration validation artifact and is
+   recorded under `live_jev` in `benchmarks/results.json`, excluded from every
+   benchmark aggregate, comparison, and timing. It establishes that the
+   integration works; it supports no claim about accuracy or reliability. See
+   `docs/jev.md`.
+
+### 7.4 Real-workbook fixtures are supplied, not committed
+
+The fidelity measurements in this plan — the 69,221-formula round trip, the
+152 KB VBA project, the comment and drawing losses — were taken against real
+workbooks. Those files are somebody's business data: they embed Windows
+usernames, absolute business paths, and proprietary macro code. None of them is
+in this repository, and no filesystem location is assumed anywhere in it.
+
+They are located at test time through `fixtures/real.py`. Set
+`EXCELPILOT_REAL_WORKBOOKS` to a directory containing a `manifest.json` that maps
+a **role** to a workbook path:
+
+```json
+{
+  "large":           "path/to/a-big-workbook.xlsx",
+  "wide":            "path/to/a-wide-workbook.xlsx",
+  "macro_extension": "path/to/a-macro-enabled.xlsm",
+  "macro_project":   "path/to/a-macro-enabled.xlsm"
+}
+```
+
+Every role is optional, and every real-workbook test skips when its role is not
+configured — so the suite passes on a machine that has no such collection, which
+is the case in CI. The roles name a *property* the workbook must have rather than
+a particular file, so the same tests work with any collection, and no test pins
+the digest of any individual's file.
+
+**Changed at release freeze:** the tests previously hard-coded a path outside the
+repository. That encoded a private filesystem convention in a public codebase.
+The coverage is unchanged — the 13 real-workbook tests still assert the same
+properties — but the fixture location is now the operator's to supply.
 
 ---
 
@@ -284,7 +327,53 @@ See `docs/limitations.md` for the authoritative list of what is *not* supported.
 
 ---
 
-## 9. Final verification record
+## 9. Phase 8 — what the benchmark found
+
+The benchmark was run as a correctness instrument, not a scoreboard. It found
+three defects the test suite had not, plus one found while preparing the live
+call:
+
+1. **Underscore-prefixed sheet names were unreachable.** The planner required a
+   capitalised whole-word match, and `_` is not uppercase — so a request naming
+   a hidden internal sheet (`_Lookup`, `_Lists`, `_AuditState`) fell through to
+   the largest visible sheet. **The `hidden_sheet_change` rule then never
+   fired**, because the plan no longer referenced the hidden sheet. A safety
+   check was bypassed by a name matcher. Fixed, with a stoplist guarding the
+   original false positive, and covered by regression tests.
+
+2. **Verification failure semantics were conflated.** A scenario expected
+   success on a workbook already containing `#REF!`. The system was right and
+   the expectation was wrong. A distinct `verify_fails` outcome was added, so
+   *stopped it* and *checked it and found damage* are never conflated.
+
+3. **Cold-start ordering produced a false timing result.** The baseline
+   appeared slower than the full pipeline, which is impossible given it does
+   less work — it ran first and absorbed all cold-start cost. A discarded
+   warmup pass was added, plus a spread-based comparison that now reports an
+   unmeasurable difference as unmeasurable.
+
+4. **A stale capability claim in the JEV prompt.** Rendering the exact outbound
+   payload before the live call showed the `verification` question telling the
+   model *"ExcelPilot cannot recalculate Excel formulas"* — false since Phase 6.
+   The wording is now derived from the run's measured capability, and
+   `state.capabilities` carries the fact as evidence.
+
+Two further defects were found by reading the documentation back against the
+code during Phase 9:
+
+5. **`excelpilot verify` ignored the configured recalculation setting**, so it
+   reported `recalculated: false` on a workbook the run itself had just
+   recalculated. The command was also the only one without `--config`. Both
+   fixed; the existing test had hard-coded `False` and so encoded the defect as
+   expected behaviour.
+
+6. **`make smoke` was not runnable unattended** — it called `input()` and failed
+   with `EOFError` on every non-tty shell and CI run. A smoke test that cannot
+   pass unattended is not a smoke test.
+
+---
+
+## 10. Final verification record
 
 Recorded in `docs/verification-report.md`, produced by running
 `make check && make test` on a clean checkout. Every claim in the README and in the

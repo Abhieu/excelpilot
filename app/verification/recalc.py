@@ -29,7 +29,10 @@ recalculation that fails is reported as a failure, not quietly downgraded to
 
 from __future__ import annotations
 
+import contextlib
+import os
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -86,6 +89,26 @@ class Recalculator(Protocol):
     def available(self) -> bool: ...
 
     def recalculate(self, path: Path, *, max_cells: int = DEFAULT_MAX_CELLS) -> RecalcResult: ...
+
+
+@contextlib.contextmanager
+def _muted_stderr() -> Iterator[None]:
+    """Silence a third-party library's chatter for the duration of a block.
+
+    ``formulas`` draws tqdm progress bars and prints scheduler warnings straight to
+    stderr. Those are noise to an operator reading a report, and they corrupt
+    ``--json`` consumers that merge stderr into stdout.
+
+    Only the library's own output is suppressed, and only inside this block —
+    ExcelPilot writes nothing during it, so nothing of ours can be lost. If
+    redirecting stderr fails for any reason, the block simply proceeds and the
+    noise stays, which is preferable to failing a verification over a stream.
+    """
+    try:
+        with Path(os.devnull).open("w") as sink, contextlib.redirect_stderr(sink):
+            yield
+    except (OSError, ValueError):
+        yield
 
 
 def _unwrap(value: Any) -> Any:
@@ -214,8 +237,9 @@ class FormulaRecalculator:
                 # `formulas` emits noisy warnings on import; they are not ours and
                 # would drown the CLI's own output.
                 warnings.simplefilter("ignore")
-                model = formulas.ExcelModel().loads(str(path)).finish()
-                solution = model.calculate()
+                with _muted_stderr():
+                    model = formulas.ExcelModel().loads(str(path)).finish()
+                    solution = model.calculate()
         except Exception as error:  # noqa: BLE001 - a failed recalculation is a result
             return RecalcResult(
                 available=True,

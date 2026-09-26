@@ -101,12 +101,22 @@ class Executor:
             try:
                 self._guard_operation(workbook, operation, inspection, output_path)
             except ExcelPilotError as error:
+                # A guard denial is a *security* event, so it must be attributable
+                # to the rule that fired. `PolicyDenied` carries `rule_ids`; without
+                # copying them onto the operation result they are lost by the time
+                # the run record is written, and an auditor reading the trail sees
+                # a failed run with a readable reason but no rule to attribute it
+                # to — indistinguishable from an incidental failure.
+                denied_rules = list(getattr(error, "rule_ids", []) or [])
                 state.operations.append(
                     OperationResult(
                         operation=operation.operation.value,
                         status="failed",
                         error=f"blocked before execution: {error}",
-                        details={"guard": "policy_or_target_check"},
+                        details={
+                            "guard": "policy_or_target_check",
+                            "denied_by_rules": denied_rules,
+                        },
                     )
                 )
                 state.errors.append(f"{operation.operation.value}: {error}")

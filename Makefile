@@ -38,12 +38,12 @@ test-e2e: $(PY)
 	uv run pytest -m e2e -v
 
 lint: $(PY)
-	uv run ruff check app tests
-	uv run ruff format --check app tests
+	uv run ruff check app tests benchmarks fixtures
+	uv run ruff format --check app tests benchmarks fixtures
 
 format: $(PY)
-	uv run ruff format app tests
-	uv run ruff check --fix app tests
+	uv run ruff format app tests benchmarks fixtures
+	uv run ruff check --fix app tests benchmarks fixtures
 
 typecheck: $(PY)
 	uv run mypy

@@ -41,10 +41,31 @@ RUN_FILE = "run.json"
 AUDIT_FILE = "audit.jsonl"
 MANIFEST_FILE = "manifest.json"
 REPORT_FILE = "report.txt"
-SNAPSHOT_FILE = "source.snapshot.xlsx"
+#: Snapshot stem. The **suffix is the source's own**, not a fixed one — see
+#: :func:`snapshot_file_name`.
+SNAPSHOT_STEM = "source.snapshot"
 VERIFICATION_FILE = "verification.json"
 OUTPUT_DIR = "output"
 LOCK_FILE = ".lock"
+
+
+def snapshot_file_name(source: str | Path) -> str:
+    """Name the source snapshot after the source's real extension.
+
+    This used to be the constant ``"source.snapshot.xlsx"``, which silently
+    destroyed macro projects.
+
+    The executor does not open the user's file; it opens this snapshot. The
+    reader decides ``keep_vba`` from the *extension it sees*, so a ``.xlsm``
+    snapshotted as ``.xlsx`` is loaded with ``keep_vba=False`` and openpyxl then
+    drops ``xl/vbaProject.bin`` on save. The run's output was therefore an
+    ``.xlsm`` with no macros in it, while the source stayed untouched and every
+    other check passed.
+
+    Preserving the suffix keeps the reader's own rule honest: a macro-enabled
+    source is snapshotted as macro-enabled.
+    """
+    return f"{SNAPSHOT_STEM}{Path(source).suffix.lower()}"
 
 
 class RunLocked(StorageError):
@@ -55,9 +76,15 @@ class RunLocked(StorageError):
 
 @dataclass(frozen=True, slots=True)
 class RunPaths:
-    """Every path in a run directory, derived from its id."""
+    """Every path in a run directory, derived from its id.
+
+    ``snapshot_suffix`` defaults to ``.xlsx`` so an existing run directory still
+    resolves; callers that know the source should pass its real suffix, because
+    the extension is what the reader uses to decide ``keep_vba``.
+    """
 
     root: Path
+    snapshot_suffix: str = ".xlsx"
 
     @property
     def run_file(self) -> Path:
@@ -77,7 +104,7 @@ class RunPaths:
 
     @property
     def snapshot_file(self) -> Path:
-        return self.root / SNAPSHOT_FILE
+        return self.root / f"{SNAPSHOT_STEM}{self.snapshot_suffix}"
 
     @property
     def verification_file(self) -> Path:
@@ -106,12 +133,18 @@ class FileRunStore:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def paths(self, run_id: str) -> RunPaths:
-        """Paths for a run id. Does not create anything."""
+    def paths(self, run_id: str, *, source: str | Path | None = None) -> RunPaths:
+        """Paths for a run id. Does not create anything.
+
+        Pass ``source`` so the snapshot keeps the source's real extension; the
+        reader derives ``keep_vba`` from it. Omitting it falls back to ``.xlsx``,
+        which is correct only for a non-macro source.
+        """
         if not run_id or "/" in run_id or "\\" in run_id or run_id.startswith("."):
             # A run id becomes a directory name, so it must not be able to escape.
             raise StorageError(f"invalid run id: {run_id!r}")
-        return RunPaths(root=self.runs_root / run_id)
+        suffix = Path(source).suffix.lower() if source else ".xlsx"
+        return RunPaths(root=self.runs_root / run_id, snapshot_suffix=suffix)
 
     def create(self, run_id: str) -> RunPaths:
         """Create a run directory, failing if one already exists."""
@@ -121,11 +154,31 @@ class FileRunStore:
         paths.ensure()
         return paths
 
-    def ensure(self, run_id: str) -> RunPaths:
-        """Get (creating if needed) the directory for a run id."""
-        paths = self.paths(run_id)
+    def ensure(self, run_id: str, *, source: str | Path | None = None) -> RunPaths:
+        """Get (creating if needed) the directory for a run id.
+
+        Pass ``source`` so the snapshot path keeps the source's real extension.
+        """
+        paths = self.paths(run_id, source=source)
         paths.ensure()
         return paths
+
+    def find_snapshot(self, run_id: str) -> Path | None:
+        """Locate a run's source snapshot regardless of the suffix it was saved with.
+
+        The snapshot keeps the source's extension, which is not known from the
+        run id alone. The run directory is authoritative, so glob for the stem
+        rather than assuming ``.xlsx``.
+
+        Returns ``None`` when the run has no snapshot, so callers can report that
+        rather than silently verifying against nothing.
+        """
+        paths = self.paths(run_id)
+        preferred = paths.snapshot_file
+        if preferred.exists():
+            return preferred
+        matches = sorted(paths.root.glob(f"{SNAPSHOT_STEM}.*"))
+        return matches[0] if matches else None
 
     def exists(self, run_id: str) -> bool:
         try:
@@ -166,8 +219,8 @@ class FileRunStore:
         shared-string cache (ADR-0009), so a re-saved "snapshot" would not be the
         user's original (ADR-0010).
         """
-        paths = self.ensure(run_id)
-        destination = paths.snapshot_file
+        source = Path(source)
+        destination = self.ensure(run_id, source=source).snapshot_file
         shutil.copy2(source, destination)
         return destination
 

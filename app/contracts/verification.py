@@ -231,8 +231,9 @@ class ReconciliationReport(ContractModel):
     recalculated: bool = Field(
         default=False,
         description=(
-            "Always False. ExcelPilot cannot recalculate Excel formulas; see "
-            "docs/limitations.md. Present so no consumer can assume otherwise."
+            "Whether formulas were actually evaluated for this run. False means the "
+            "totals below were computed from cached values, which is weaker. Present "
+            "so no consumer can assume a reconciliation was verified by evaluation."
         ),
     )
 
@@ -298,9 +299,18 @@ class CheckResult(ContractModel):
 class VerificationResult(ContractModel):
     """The complete verification verdict for a run.
 
-    ``recalculated`` is always ``False``. ExcelPilot cannot evaluate Excel
-    formulas (ADR-0001/0011); formula checks are static, and this field exists so
-    no consumer can mistake one for the other.
+    ``recalculated`` and ``static_formula_checks`` are inverse and exactly one is
+    true. They report which kind of claim this verdict is making:
+
+    * ``recalculated`` is True only when a recalculation actually completed for
+      this file (ADR-0011, ``app.verification.recalc``). Evaluation detects errors
+      static analysis cannot see, such as a formula that evaluates to ``#VALUE!``.
+    * ``static_formula_checks`` is True when evaluation was unavailable or failed,
+      in which case the formula checks are presence, pattern, and reference
+      integrity only — real, but strictly weaker.
+
+    Keeping both fields means a consumer can never read a static result as though
+    it had been evaluated.
     """
 
     run_id: str

@@ -733,23 +733,75 @@ def _candidate_sheets(text: str, inspection: WorkbookInspection) -> list[_SheetC
     return scored
 
 
+#: Sheet names that are also ordinary words naming an operation or a structure.
+#:
+#: A request containing "summary" means the *operation*, not a sheet called
+#: ``Summary``. These are excluded from the lowercase-whole-word match so that
+#: rule stays safe, while still allowing genuinely distinctive names to match
+#: regardless of capitalisation.
+_AMBIGUOUS_SHEET_NAMES: frozenset[str] = frozenset(
+    {
+        "summary",
+        "data",
+        "list",
+        "lists",
+        "report",
+        "reports",
+        "table",
+        "tables",
+        "total",
+        "totals",
+        "info",
+        "information",
+        "details",
+        "index",
+        "home",
+        "input",
+        "output",
+        "results",
+        "result",
+        "sheet",
+        "sheets",
+        "log",
+        "logs",
+        "notes",
+        "todo",
+        "test",
+        "temp",
+        "tmp",
+        "copy",
+        "new",
+        "old",
+    }
+)
+
+
 def _mentions_word(text: str, name: str) -> bool:
-    """Whether the request names a sheet as a **capitalised** whole word.
+    """Whether the request names a sheet as a whole word.
 
-    Two conditions, both necessary:
+    Word boundaries are always required, so a sheet named ``Sales`` is not matched
+    inside "wholesale", nor ``Data`` inside "metadata".
 
-    * **Word boundaries**, so a sheet named ``Sales`` is not matched inside
-      "wholesale", nor ``Data`` inside "metadata".
-    * **Capitalisation**, because a sheet name is a proper noun in a request
-      ("on Sales"), whereas an operation word is not.
-
-    Requests that name a sheet in lowercase ("on sales") still work: the quoted and
-    introduced tiers catch those.
+    Capitalisation is normally required, because a sheet name is a proper noun in
+    a request ("on Sales") whereas an operation word is not. The exception is a
+    name that cannot plausibly be an operation word — one containing a character
+    outside ``[A-Za-z0-9 ]``. That exception matters in practice: Excel's own
+    convention for internal sheets is a leading underscore (``_Lists``,
+    ``_AuditState``, ``_Lookup``), and a planner that cannot address them is blind
+    to exactly the sheets an operator most wants protected.
     """
     if not name:
         return False
-    for match in re.finditer(rf"(?<!\w)({re.escape(name)})(?!\w)", text):
-        if match.group(1)[:1].isupper():
+    distinctive = not name.replace("_", "").replace("-", "").isalpha() or any(
+        char in name for char in "_-"
+    )
+    ambiguous = name.strip().lower() in _AMBIGUOUS_SHEET_NAMES
+
+    for match in re.finditer(rf"(?<!\w)({re.escape(name)})(?!\w)", text, re.IGNORECASE):
+        as_written = match.group(1)
+        if as_written[:1].isupper():
+            return True
+        if distinctive and not ambiguous:
             return True
     return False
 

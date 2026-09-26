@@ -1,0 +1,117 @@
+name: CI
+
+# The gates an open-source release candidate must not be able to regress past.
+#
+# Deliberately minimal: one job, one Python version, no matrix. A distributed
+# matrix was considered and rejected — this project has one engine (openpyxl),
+# one CLI, and no compiled extension, so extra versions would add minutes
+# without adding evidence.
+#
+# Determinism: `uv sync --locked` resolves from uv.lock, so the dependency set
+# is pinned exactly. The Python minor series is pinned to 3.13 but not to a
+# patch, deliberately — pinning a patch would silently stop testing new 3.13.x
+# security releases, which is a worse trade than the tiny version drift it
+# avoids. The macro fixture is generated deterministically, so it contributes no
+# variance.
+#
+# Deliberately excluded:
+#   * the 165-run benchmark. It takes minutes and its result is a recorded
+#     measurement in benchmarks/results.json, not a pass/fail gate. Running it
+#     on every PR would invite someone to "fix" a timing difference that was
+#     already shown to be noise.
+#   * live JEV calls. They cost money and require explicit authorisation. No
+#     step in this workflow can reach a paid endpoint: JEV is mocked by default
+#     and `--allow-paid-calls` is never passed.
+#   * `make test-slow`. ~7 minutes against very large real workbooks, and it
+#     skips itself when the collection is absent. Run it before a release.
+#
+# No step depends on a private workbook or a developer-specific path. The real
+# workbooks referenced by `tests/test_vba.py` and `tests/test_workbook.py` are
+# skipped by `skipif` when the collection is not present, which is the case here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: uv
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # `dev` includes `formulas`, so the recalculation path is exercised here
+      # rather than only for users who opt into the extra. A change that breaks
+      # recalculation therefore fails CI even though it is optional at runtime.
+      - name: Install
+        run: uv sync --extra dev --locked
+
+      # Ruff and strict mypy first: both are fast, and a type error is cheaper
+      # to read here than inside a test failure.
+      - name: Lint
+        run: make lint
+
+      - name: Type check
+        run: make typecheck
+
+      # The pre-commit gate: format, lint, types, and the fast tests.
+      - name: Pre-commit gate
+        run: make check
+
+      # Security boundary tests, as their own step. They are the ones a
+      # maintainer must think about when reviewing a change, so they are
+      # named rather than buried in a single test count.
+      - name: Security boundary tests
+        run: make test-security
+
+      - name: End-to-end tests
+        run: make test-e2e
+
+      # The benchmark harness's own tests. These do not run the 165-run
+      # benchmark — they assert the harness is sound (that every scenario runs
+      # in every mode, that a single repeat cannot produce a timing claim, and
+      # that the paid-call gate is reachable through exactly one explicit
+      # check). Keeping them in CI is what stops a broken harness from
+      # silently becoming untested.
+      - name: Benchmark harness tests
+        run: uv run pytest -m benchmark
+
+      - name: Smoke test
+        run: make smoke
+
+      # Proves the package installs, imports, and exposes its entry point,
+      # which the test suite does not: tests import from the source tree.
+      - name: Packaging and import smoke
+        run: |
+          uv run python -c "import app; print(app.__name__)"
+          uv run excelpilot version
+          uv run python -c "
+          from fixtures.vba import build_macro_workbook, build_vba_project_bin
+          from app.workbook import has_vba
+          import pathlib, tempfile
+          p = build_macro_workbook(pathlib.Path(tempfile.mkdtemp()) / 'm.xlsm')
+          assert has_vba(p), 'the committed VBA fixture stopped generating a macro workbook'
+          assert build_vba_project_bin()[:8] == bytes.fromhex('d0cf11e0a1b11ae1')
+          print('fixture ok')
+          "

@@ -151,6 +151,15 @@ class DecisionContext(ContractModel):
     hidden_sheets_present: bool = False
     ambiguity_signals: list[str] = Field(default_factory=list)
     operation_kinds: list[str] = Field(default_factory=list)
+    #: Whether this run can actually evaluate Excel formulas.
+    #:
+    #: A measured fact about the run, not an assumption about the product.
+    #: Recalculation depends on an optional extra being installed, so the answer
+    #: differs between deployments — and the JEV verification question is worded
+    #: from this field. Getting it wrong would either have the decision model pick
+    #: a weaker check than the system can perform, or expect a guarantee the run
+    #: cannot deliver.
+    recalculation_available: bool = False
 
 
 class JevDecision(ContractModel):

@@ -771,6 +771,7 @@ class TestCompareWorkbooks:
         assert details["matched"] == 2
 
 
+@pytest.mark.security
 class TestExecutorGuards:
     def test_rejects_duplicate_mutating_operations(self, sales: Path) -> None:
         op = NormalizeValues(

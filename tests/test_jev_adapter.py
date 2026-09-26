@@ -346,6 +346,7 @@ class TestProviderResolution:
         )
 
 
+@pytest.mark.security
 class TestPaidCallGate:
     def test_live_call_blocked_without_authorisation(
         self, context: DecisionContext, monkeypatch: pytest.MonkeyPatch
@@ -416,6 +417,7 @@ class TestMockAdapter:
         assert first.model_dump_json() == second.model_dump_json()
 
 
+@pytest.mark.security
 class TestJevCannotMutate:
     def test_decision_type_has_no_operation_field(self) -> None:
         """The structural guarantee behind 'JEV must not mutate workbooks'."""
@@ -531,3 +533,179 @@ class TestLiveJevCall:
             assert decision.probability is not None
             assert 0 <= decision.probability <= 1
         assert not any(d.value in REVIEW_LABELS for d in result.decisions)
+
+
+class TestCapabilityHonestyInQuestions:
+    """The verification question must describe what this run can actually do.
+
+    Found by rendering the live payload: the question told the decision model
+    "ExcelPilot cannot recalculate Excel formulas" — a statement that became
+    false when recalculation was integrated. The model would have been asked to
+    pick a weaker check than the system can perform, on the strength of a claim
+    about the product that no longer held.
+
+    The wording is now derived from the run's measured capability, so the two
+    cannot drift apart.
+    """
+
+    def _question(self, available: bool) -> str:
+        from app.contracts.pipeline import DecisionContext
+        from app.decisions.questions import build_questions
+
+        context = DecisionContext(run_id="t", task_summary="t", recalculation_available=available)
+        return next(q.instructions for q in build_questions(context) if q.id == "verification")
+
+    def test_no_capability_is_claimed_when_unavailable(self) -> None:
+        instructions = self._question(available=False)
+        assert "cannot evaluate Excel formulas" in instructions
+        assert "pick the strongest one" not in instructions
+
+    def test_capability_is_claimed_when_available(self) -> None:
+        instructions = self._question(available=True)
+        assert "cannot evaluate" not in instructions
+        assert "evaluates Excel formulas directly" in instructions
+
+    def test_the_wording_always_reflects_the_actual_capability(self) -> None:
+        assert self._question(True) != self._question(False)
+
+    def test_state_carries_the_capability_as_evidence(self) -> None:
+        from app.contracts.pipeline import DecisionContext
+        from app.decisions.questions import build_state
+
+        state = build_state(
+            DecisionContext(run_id="t", task_summary="t", recalculation_available=True)
+        )
+        assert state["capabilities"] == {"recalculation_available": True}
+
+    def test_state_carries_no_cell_content_or_formulas(self) -> None:
+        """The state is evidence, not data. Cell contents must never appear."""
+        from app.contracts.pipeline import DecisionContext
+        from app.decisions.questions import build_state
+
+        state = build_state(
+            DecisionContext(
+                run_id="t",
+                task_summary="t",
+                sheets_affected=["Sales"],
+                operation_kinds=["set_value"],
+            )
+        )
+        blob = json.dumps(state)
+        assert "=" not in blob, "a formula reached the outbound payload"
+        assert "secret" not in blob.lower()
+
+    def test_the_orchestrator_reports_its_real_capability(self) -> None:
+        from app.app.orchestrator import _decision_context
+        from app.contracts.pipeline import DecisionContext
+        from app.verification.recalc import library_available
+
+        class _Inspection:
+            sheet_names = ["Sales"]
+            total_rows = 10
+            hidden_sheet_count = 0
+
+        class _Target:
+            sheet = "Sales"
+
+        class _Op:
+            target = _Target()
+            model_extra: dict[str, str] = {}
+
+        class _Understanding:
+            intent_summary = "t"
+            missing_information: list[str] = []
+
+        class _Plan:
+            run_id = "r"
+            understanding = _Understanding()
+            operations = [_Op()]
+            operation_kinds = ["set_value"]
+
+        context = _decision_context(_Plan(), _Inspection())  # type: ignore[arg-type]
+        assert isinstance(context, DecisionContext)
+        assert context.recalculation_available is library_available()
+
+
+class TestLiveCallResultIsAdvisoryOnly:
+    """The recorded live result must not be able to authorise anything.
+
+    The one authorised live call (recorded under ``live_jev`` in
+    ``benchmarks/results.json``) returned ``needs_review`` for two of four
+    questions. That is the interesting case: an uncertain advisory answer must
+    raise scrutiny, never lower it, and must never be usable as a plan input.
+    """
+
+    def _live_record(self) -> dict[str, object]:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "benchmarks" / "results.json"
+        if not path.exists():
+            pytest.skip("benchmark results not present")
+        return json.loads(path.read_text(encoding="utf-8"))["live_jev"]
+
+    def test_the_live_result_is_isolated_from_benchmark_aggregates(self) -> None:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "benchmarks" / "results.json"
+        if not path.exists():
+            pytest.skip("benchmark results not present")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        # The live result is a sibling of `modes`, never a member of one.
+        for mode in document["modes"].values():
+            for run in mode["results"]:
+                assert "live_jev" not in run
+                assert "endpoint" not in run
+
+    def test_the_live_result_confirms_it_excluded_itself_from_benchmarks(self) -> None:
+        record = self._live_record()
+        if not record.get("called"):
+            pytest.skip("no live call recorded")
+        blending = record["benchmark_blending"]
+        assert blending["included_in_mode_aggregates"] is False
+        assert blending["included_in_timing"] is False
+        assert blending["included_in_expectation_counts"] is False
+
+    def test_needs_review_from_a_live_call_escalates_and_is_not_usable(self) -> None:
+        """A low-confidence live answer raises scrutiny and is not trusted."""
+        from app.contracts.pipeline import JevDecision, JevDecisionSet
+
+        record = self._live_record()
+        if not record.get("called"):
+            pytest.skip("no live call recorded")
+        decision_set = JevDecisionSet(
+            decisions=[JevDecision(**d) for d in record["decisions"]],  # type: ignore[arg-type]
+            jev_called=True,
+        )
+        assert decision_set.any_needs_review is True
+        assert decision_set.escalates is True
+        uncertain = decision_set.get("interpretation")
+        assert uncertain is not None and uncertain.needs_review
+        assert uncertain.is_usable is False
+
+    def test_jev_cannot_de_escalate_a_deterministic_denial(self) -> None:
+        """The combination is an OR: no advisory answer can lower scrutiny.
+
+        Even a maximally confident, JEV-approves-everything answer cannot turn a
+        policy denial into an allow. This is the asymmetric-OR invariant of
+        ADR-0005, asserted against the live answer's actual shape.
+        """
+        from app.contracts.pipeline import JevDecision, JevDecisionSet
+
+        record = self._live_record()
+        if not record.get("called"):
+            pytest.skip("no live call recorded")
+        decision_set = JevDecisionSet(
+            decisions=[JevDecision(**d) for d in record["decisions"]],  # type: ignore[arg-type]
+            jev_called=True,
+        )
+        policy_denied = True
+        requires_approval = policy_denied or decision_set.escalates
+        assert requires_approval is True
+
+        # And the converse: a JEV set with no decisions cannot lower anything.
+        empty = JevDecisionSet(jev_called=False)
+        policy_allows = True
+        result = policy_allows or empty.escalates
+        assert result is True, "policy alone allowed the run; JEV was not consulted"

@@ -315,6 +315,7 @@ class TestFullPipeline:
         assert file_sha256(source) == before
 
 
+@pytest.mark.security
 class TestSafetyGates:
     def test_dry_run_changes_nothing(
         self, source: Path, orchestrator: RunOrchestrator, workspace: Path
@@ -361,6 +362,7 @@ class TestSafetyGates:
         assert result.plan.understanding.missing_information
 
 
+@pytest.mark.security
 class TestJevCannotAuthorise:
     def test_a_confident_jev_does_not_bypass_a_deny(
         self, source: Path, config: ExcelPilotConfig
@@ -396,6 +398,7 @@ class TestJevCannotAuthorise:
         assert request.jev_escalated is True
 
 
+@pytest.mark.security
 class TestVerificationGates:
     def test_verification_failure_fails_the_run(
         self, source: Path, config: ExcelPilotConfig
@@ -465,6 +468,7 @@ class TestRejectionAndFailure:
         assert result.error
 
 
+@pytest.mark.security
 class TestReplaySafety:
     def test_replay_reconstructs_without_executing(
         self, source: Path, orchestrator: RunOrchestrator, config: ExcelPilotConfig

@@ -263,7 +263,7 @@ def plan(
         output.line()
         output.warn("this request is not specific enough to act on:")
         for item in planned.understanding.missing_information:
-            output.field("", item)
+            output.item(item)
     if planned.notes:
         output.line()
         for note in planned.notes:
@@ -294,7 +294,7 @@ def plan(
     output.heading("Policy")
     output.field("outcome", str(policy.outcome))
     for reason in policy.reasons:
-        output.field("", reason)
+        output.item(reason)
     if policy.rule_ids:
         output.field("rules", ", ".join(policy.rule_ids))
 
@@ -562,24 +562,42 @@ def verify(
         typer.Option("--run", help="Run id, to compare against that run's source snapshot."),
     ] = None,
     as_json: JsonOption = False,
+    config: Annotated[
+        str | None,
+        typer.Option("--config", "-c", help="Path to a TOML configuration file."),
+    ] = None,
     workspace: WorkspaceOption = None,
 ) -> None:
     """Verify a workbook on its own, or against a run's source snapshot.
 
-    Verification is static: formulas are checked for presence, pattern, and
-    reference integrity, never recalculated. ExcelPilot cannot evaluate Excel
-    formulas, and never claims to.
+    Formulas are checked for presence, pattern, and reference integrity, and
+    evaluated when the optional 'recalc' extra is installed. The result states
+    which of the two it did, so a static result is never read as an evaluated
+    one.
     """
     from app.verification import Verifier, describe
+    from app.verification.recalc import FormulaRecalculator, NullRecalculator
 
     try:
-        effective = _load_config(None, workspace=workspace)
+        effective = _load_config(config, workspace=workspace)
         store = FileRunStore(effective)
-        before = store.paths(run_id).snapshot_file if run_id else None
+        before = store.find_snapshot(run_id) if run_id else None
         if run_id and (before is None or not before.exists()):
             output.error(f"no source snapshot for run {run_id!r}")
             raise typer.Exit(code=Exit.NOT_FOUND)
-        result = Verifier(effective.anomaly).verify(
+        # Honour the configured recalculation setting, exactly as `run` does.
+        # Without this, `verify` reported `recalculated: false` on a workbook that
+        # the run itself had recalculated successfully — a standalone check that
+        # was weaker than the run it was checking, and a false negative about
+        # what the deployment can do.
+        recalculator = (
+            FormulaRecalculator(
+                timeout_seconds=effective.verification.recalculation_timeout_seconds
+            )
+            if effective.verification.enable_recalculation
+            else NullRecalculator()
+        )
+        result = Verifier(effective.anomaly, recalculator=recalculator).verify(
             run_id or "adhoc", _workbook(workbook), before_path=before
         )
     except ExcelPilotError as error:
@@ -761,11 +779,11 @@ def policy(
     output.line()
     output.line("Hard deny rules (cannot be disabled by configuration):")
     for rule_id in payload["hard_deny_rules"]:
-        output.field("", rule_id)
+        output.item(rule_id)
     output.line()
     output.line("Escalation rules (set require_approval when they fire):")
     for rule_id in payload["escalation_rules"]:
-        output.field("", rule_id)
+        output.item(rule_id)
     output.line()
     output.heading("Thresholds")
     output.table(

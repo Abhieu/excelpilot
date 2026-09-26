@@ -111,8 +111,14 @@ def build_questions(context: DecisionContext) -> list[DecisionQuestion]:
             type="choice",
             instructions=(
                 f"{_EVIDENCE_PREAMBLE} Choose the verification that would best establish "
-                f"that this change did what was intended. ExcelPilot cannot recalculate "
-                f"Excel formulas, so pick the strongest check that does not depend on that."
+                f"that this change did what was intended. "
+                + (
+                    "This run evaluates Excel formulas directly, so a check that depends "
+                    "on computed values is available — pick the strongest one."
+                    if context.recalculation_available
+                    else "This run cannot evaluate Excel formulas, so pick the strongest "
+                    "check that does not depend on computed values."
+                )
             ),
             criteria={
                 "structural_check": (
@@ -164,6 +170,11 @@ def build_state(context: DecisionContext) -> dict[str, object]:
             "formulas_to_remove": context.formulas_to_remove,
             "records_removed": context.records_removed,
             "structural_change": context.structural_change,
+        },
+        "capabilities": {
+            # Sent so the model can judge the verification question against what
+            # this run can actually do, rather than against a general assumption.
+            "recalculation_available": context.recalculation_available,
         },
         "ambiguity_signals": context.ambiguity_signals,
     }

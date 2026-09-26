@@ -70,6 +70,7 @@ class TestReadOnlyIsAllowed:
         assert decision.outcome is PolicyOutcome.ALLOW
 
 
+@pytest.mark.security
 class TestHardDenyRules:
     def test_source_never_overwritten(self, engine: PolicyEngine) -> None:
         decision = engine.evaluate(
@@ -236,6 +237,7 @@ class TestEscalationRules:
         assert "restricted_data" in decision.rule_ids
 
 
+@pytest.mark.security
 class TestDenyWinsOverEscalate:
     def test_deny_short_circuits(self, engine: PolicyEngine) -> None:
         """A deny must not be softened because an escalation also fired."""
@@ -251,6 +253,7 @@ class TestDenyWinsOverEscalate:
         assert "destructive_operation" not in decision.rule_ids
 
 
+@pytest.mark.security
 class TestJevIsAdvisoryOnly:
     def test_jev_cannot_override_a_deny(self, engine: PolicyEngine) -> None:
         confident = JevDecisionSet(
@@ -313,6 +316,7 @@ class TestJevIsAdvisoryOnly:
         assert decision.outcome is PolicyOutcome.REQUIRE_APPROVAL
 
 
+@pytest.mark.security
 class TestPurity:
     def test_same_request_same_decision(self, engine: PolicyEngine) -> None:
         request = _request(

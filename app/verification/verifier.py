@@ -87,6 +87,13 @@ class Verifier:
                 notes=["the output file does not exist"],
             )
 
+        # Did the output silently lose workbook content? A cell-level diff cannot
+        # see this: openpyxl drops comments, drawings, and macro-bound shapes, and
+        # every other check would still pass. Checked against the pre-run
+        # snapshot, which is a byte copy of the source.
+        if before_path is not None:
+            structural.append(structural_checks.check_no_parts_lost(before_path, output_path))
+
         recalc = self.recalculator.recalculate(output_path)
 
         try:
@@ -323,8 +330,9 @@ def _overall_status(
 def describe(result: VerificationResult) -> str:
     """Human-readable verification report.
 
-    Always states that formulas were checked statically and never recalculated,
-    because that is the single most important caveat in the system.
+    Always states whether formulas were evaluated or only checked statically,
+    because that distinction is the single most important caveat in the system
+    and a reader must never have to guess which one they are looking at.
     """
     lines: list[str] = []
     lines.append(f"Verification: {result.status.value}")

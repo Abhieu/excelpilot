@@ -4,10 +4,11 @@ Two kinds of evidence:
 
 1. **Synthetic fixtures** built by ``fixtures/workbooks.py``, so conditions
    (hidden sheets, formula damage, injection payloads, VBA) are deliberate.
-2. **Real workbooks** from the user's ``Excel Automation/Airtel Internship
-   Macros`` collection, when present. These are the real fidelity bar — a 6-sheet
-   workbook with 69,221 formulas, and a 37,883x120 sheet. Real-file tests skip
-   cleanly when the collection is absent, so the suite stays self-contained.
+2. **Real workbooks**, when configured. These are the real fidelity bar — a 6-sheet
+   workbook with 69,221 formulas, and a 37,883x120 sheet. They are located at test
+   time via ``fixtures/real.py``; no particular collection, filename, or
+   filesystem path is assumed, and every real-file test skips cleanly when none is
+   configured, so the suite stays self-contained.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from fixtures import real
 from fixtures.workbooks import build, minimal, monthly_sales
 
 from app.contracts.config import LimitsConfig
@@ -36,23 +38,25 @@ from app.workbook import (
 )
 from app.workbook.limits import check_archive_integrity, check_extension
 
-#: Real workbooks, when the user's Excel collection is available.
-REAL_ROOT = (
-    Path(__file__).resolve().parent.parent.parent / "Excel Automation" / "Airtel Internship Macros"
-)
+#: Real workbooks, located at test time rather than assumed to be at a fixed
+#: path. See ``fixtures/real.py`` for how to supply them. Nothing about any
+#: particular collection, filename, or filesystem layout is encoded here.
+_ROLES = ("large", "wide", "macro_extension")
 
-REAL_WORKBOOKS = [
-    REAL_ROOT / "15_Software_Lifecycle_Sunset_Tracker" / "Sunset Tracker.xlsx",
-    REAL_ROOT
-    / "16_Contractor_Resource_Leakage_Tracker"
-    / "Contractor_Resource_Leakage_Tracker_DEMO.xlsm",
-    REAL_ROOT / "14_MRR_Automation" / "demo_data" / "Sample File" / "Sample File.xlsx",
-]
+REAL_WORKBOOKS: list[Path] = [p for p in (real.workbook(r) for r in _ROLES) if p is not None]
 
 needs_real = pytest.mark.skipif(
-    not REAL_WORKBOOKS[0].exists(),
-    reason=f"real workbook collection not present at {REAL_ROOT}",
+    not REAL_WORKBOOKS,
+    reason=real.skip_reason("large"),
 )
+
+
+def _role_or_skip(role: str) -> Path:
+    """Resolve a role, skipping the test when that workbook is not configured."""
+    path = real.workbook(role)
+    if path is None:
+        pytest.skip(real.skip_reason(role))
+    return path
 
 
 @pytest.fixture
@@ -226,6 +230,7 @@ class TestUnsupportedFormats:
         assert check_extension(path) == ".xlsm"
 
 
+@pytest.mark.security
 class TestMalformedWorkbooks:
     def test_not_a_zip(self, tmp_path: Path) -> None:
         path = tmp_path / "broken.xlsx"
@@ -286,6 +291,7 @@ class TestMalformedWorkbooks:
             check_file_size(small, LimitsConfig(max_file_size_bytes=1024))
 
 
+@pytest.mark.security
 class TestResourceLimits:
     def test_row_limit_enforced(self) -> None:
         from app.workbook.limits import check_sheet_shape
@@ -503,9 +509,9 @@ class TestRoundTripFidelity:
 @needs_real
 @pytest.mark.slow
 class TestRealWorkbooks:
-    """Fidelity against the user's actual workbooks, when available.
+    """Fidelity against real workbooks, when configured.
 
-    Marked ``slow``: the 37,883x120 sheet takes ~70s to inspect and ~226s to
+    Marked ``slow``: a very large sheet takes ~70s to inspect and ~226s to
     round-trip, because openpyxl is a whole-file in-memory model (ADR-0001).
     Excluded from ``make test-fast`` and ``make check``; run explicitly with
     ``pytest -m slow``.
@@ -513,37 +519,45 @@ class TestRealWorkbooks:
     These are the tests that justify the workbook-engine decision against real
     data rather than synthetic fixtures, so they are worth the wall-clock cost —
     but they should not sit in the pre-commit gate.
+
+    Which workbooks they run against is supplied by ``fixtures/real.py``. Nothing
+    about any particular collection is assumed, and each test skips if its role
+    is not configured.
     """
 
     def test_inspects_large_real_workbook(self) -> None:
-        path = REAL_WORKBOOKS[0]
-        result = inspect_workbook(path)
+        result = inspect_workbook(_role_or_skip("large"))
         assert result.sheet_names
         assert result.total_formulas > 1_000
         assert len(result.defined_names) > 0
 
     def test_inspects_macro_extension_workbook(self) -> None:
-        result = inspect_workbook(REAL_WORKBOOKS[1])
+        """A macro-enabled workbook opens, and is reported truthfully.
+
+        The assertion is that detection *matches the file*, not that a particular
+        fixture happens to contain no macros. A collection that does include a
+        real VBA project should report one, and this test should not fail for
+        being handed a better fixture than the one originally used.
+        """
+        path = _role_or_skip("macro_extension")
+        result = inspect_workbook(path)
         assert result.extension == "xlsm"
         assert result.sheet_names
-        # The fixture set contains no file with an actual vbaProject.bin.
-        assert result.metadata.has_vba is False
+        assert result.metadata.has_vba is has_vba(path)
 
     def test_handles_very_wide_sheet(self) -> None:
-        result = inspect_workbook(REAL_WORKBOOKS[2])
+        result = inspect_workbook(_role_or_skip("wide"))
         widest = max(result.sheets, key=lambda sheet: sheet.max_column)
         assert widest.max_column > 100
 
-    @pytest.mark.parametrize("index", [0, 1, 2])
-    def test_roundtrip_real_workbook(self, index: int, tmp_path: Path) -> None:
-        source = REAL_WORKBOOKS[index]
-        if not source.exists():
-            pytest.skip(f"{source.name} not present")
+    @pytest.mark.parametrize("role", _ROLES)
+    def test_roundtrip_real_workbook(self, role: str, tmp_path: Path) -> None:
+        source = _role_or_skip(role)
         from openpyxl import load_workbook
 
         before = inspect_workbook(source)
         workbook = load_workbook(source, keep_vba=source.suffix.lower() == ".xlsm")
-        destination = tmp_path / f"rt_{index}.xlsx"
+        destination = tmp_path / f"rt_{role}.xlsx"
         save_atomic(workbook, destination)
         workbook.close()
 

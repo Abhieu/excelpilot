@@ -1,7 +1,11 @@
 """Exercise the orchestrator end to end, on a real run.
 
-Used as a development smoke test while building the CLI. Not part of the pytest
-suite; ``tests/test_e2e.py`` holds the real end-to-end tests.
+A developer smoke test that walks the whole pipeline and prints what happened at
+each stage. Runs unattended: pass ``--keep`` to preserve the temporary workspace
+for inspection.
+
+Not part of the pytest suite; ``tests/test_e2e.py`` holds the real end-to-end
+tests with assertions.
 """
 
 from __future__ import annotations
@@ -104,9 +108,13 @@ def main() -> int:
     print("7. REPORT")
     print("   " + (result.report or "(none)").replace("\n", "\n   ")[:1200])
 
-    keep = input("\n   keep workspace for inspection? [y/N] ").strip().lower() == "y"
+    # Non-interactive by default. `make smoke` runs this with no terminal, and
+    # an unguarded `input()` made the target fail with EOFError on every CI run
+    # and every non-tty shell — a smoke test that cannot pass unattended is not
+    # a smoke test. Pass --keep to preserve the workspace instead.
+    keep = "--keep" in sys.argv[1:]
     if keep:
-        print(f"   workspace kept at {workspace}")
+        print(f"\n   workspace kept at {workspace}")
     else:
         shutil.rmtree(workspace, ignore_errors=True)
     return 0

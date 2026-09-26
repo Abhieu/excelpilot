@@ -474,3 +474,89 @@ class TestPreviewCountsCreatedSheetWrites:
         assert abs(preview.cells_to_change - actual) <= max(2, actual * 0.25), (
             f"preview said {preview.cells_to_change}, actual was {actual}"
         )
+
+
+class TestUnderscorePrefixedSheetNames:
+    """Sheet names Excel itself uses for internal sheets were unreachable.
+
+    The planner matched a sheet name only when the request capitalised it,
+    reasoning that a sheet name is a proper noun. That is true for ``Sales`` and
+    false for ``_Lookup``: the leading underscore is not an uppercase letter, so
+    the name was never recognised and the request silently fell through to the
+    largest visible sheet.
+
+    The consequence was not a wrong error. It was worse — a request naming a
+    hidden internal sheet was applied to the *main data sheet* instead, and the
+    hidden-sheet policy rule never fired because the plan no longer referenced
+    the hidden sheet. The safety check was bypassed by the name matcher.
+
+    This matters beyond the fixture: `_`-prefixed sheets are a widespread Excel
+    convention for validation lists, lookup tables, and state tracking.
+    """
+
+    def test_underscore_prefixed_sheet_is_recognised(
+        self, sales: Path, orchestrator: RunOrchestrator
+    ) -> None:
+        task = UntrustedText("normalise the Code column on _Lookup", provenance="user_task")
+        plan, *_ = orchestrator.plan(sales, task)
+        assert [op.target.sheet for op in plan.operations if op.target] == ["_Lookup"], (
+            "the named hidden sheet was not the one selected"
+        )
+
+    def test_hidden_sheet_rule_fires_once_the_sheet_is_reachable(
+        self, sales: Path, orchestrator: RunOrchestrator
+    ) -> None:
+        """The escalation must fire — it did not while the name went unmatched."""
+        run = orchestrator.run(
+            sales,
+            UntrustedText("normalise the Code column on _Lookup", provenance="user_task"),
+            approve=False,
+        )
+        assert run.record.policy_outcome is not None
+        assert run.record.policy_outcome.value == "require_approval", (
+            "writing to a hidden internal sheet must require approval"
+        )
+        assert "hidden_sheet_change" in run.record.policy_rule_ids
+
+    def test_lowercase_underscore_sheet_also_matches(
+        self, sales: Path, orchestrator: RunOrchestrator
+    ) -> None:
+        plan, *_ = orchestrator.plan(
+            sales, UntrustedText("tidy the _lookup values", provenance="user_task")
+        )
+        assert plan.operations
+        assert plan.operations[0].target.sheet == "_Lookup"
+
+    @pytest.mark.parametrize(
+        "task",
+        [
+            "create a summary by Region",
+            "summarise the total per Region",
+            "list the data by Region",
+        ],
+    )
+    def test_operation_words_still_do_not_capture_sheets(
+        self, task: str, sales: Path, orchestrator: RunOrchestrator
+    ) -> None:
+        """The relaxed match must not reintroduce the original false positive.
+
+        ``create a summary by Region`` must target the data sheet, not a sheet
+        that happens to be called ``Summary``. A stoplist of ordinary words that
+        also name an operation keeps the relaxation from becoming a false match.
+        """
+        plan, *_ = orchestrator.plan(sales, UntrustedText(task, provenance="user_task"))
+        assert plan.operations
+        assert plan.operations[0].target.sheet == "Sales", (
+            f"{task!r} captured a sheet by an operation word"
+        )
+
+    def test_explicit_summary_sheet_is_still_reachable(self) -> None:
+        """The stoplist must not stop a *capitalised* Summary from matching."""
+        from app.planner.deterministic import _mentions_word
+
+        assert _mentions_word("read the Summary sheet", "Summary") is True
+        assert _mentions_word("read the summary sheet", "Summary") is False
+        assert _mentions_word("clean _AuditState", "_AuditState") is True
+        assert _mentions_word("clean AuditState", "AuditState") is True
+        assert _mentions_word("tidy up the metadata", "Data") is False
+        assert _mentions_word("look at wholesale rows", "Sales") is False

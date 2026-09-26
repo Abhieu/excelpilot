@@ -1,0 +1,41 @@
+# What goes into the source distribution.
+#
+# setuptools' default sdist is just the package plus a few project files. That
+# is not enough here: the README links to docs/*.md on nearly every claim, and
+# an sdist consumer would find every one of those links broken. The same applies
+# to `benchmarks/results.json`, which is the recorded evidence behind the
+# measured numbers the README quotes.
+#
+# The wheel is unaffected — this governs the sdist only. The installed package
+# is still `app/`, and none of this becomes a runtime dependency.
+
+include LICENSE
+include README.md
+include SECURITY.md
+include RELEASE_NOTES.md
+include CHANGELOG.md
+include Makefile
+include .python-version
+
+# Documentation the README links to, including the ADRs that record why the
+# design decisions were made.
+recursive-include docs *.md
+
+# The benchmark suite and its recorded results. `results.json` is the evidence
+# for every benchmark number quoted in the README; shipping it means a reader
+# can check those numbers rather than take them on trust.
+recursive-include benchmarks *.py *.json
+
+# Fixture sources. The macro fixture is generated from `fixtures/vba.py`, so the
+# source is required even though no binary is committed.
+recursive-include fixtures *.py
+
+# The test suite, so `make test` and the CI gates are reproducible from an
+# sdist without fetching the repository.
+recursive-include tests *.py
+
+# Never ship local run output. Caches and bytecode are already excluded by
+# setuptools, and listing them again only produces "no previously-included
+# files matching" warnings on every build.
+prune .excelpilot
+prune .github

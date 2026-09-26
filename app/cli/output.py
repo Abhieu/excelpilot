@@ -41,6 +41,16 @@ def field(label: str, value: Any) -> None:
     _console.print(f"  {label + ':':<28} {value}")
 
 
+def item(text: str) -> None:
+    """A single entry in a list.
+
+    ``field("", value)`` was the previous way to render a list, and it produced
+    a line beginning with a bare colon followed by 26 spaces — which reads as a
+    broken render rather than as a list item.
+    """
+    _console.print(f"    {text}")
+
+
 def success(text: str) -> None:
     _console.print(f"[green]OK[/green]  {text}")
 
@@ -118,7 +128,7 @@ def dry_run_banner(preview: Any) -> None:
 
 
 def verification_banner(result: Any) -> None:
-    """Render verification, always stating that formulas were not recalculated."""
+    """Render verification, always stating whether formulas were evaluated."""
     from app.verification import describe
 
     line(describe(result))
@@ -129,6 +139,7 @@ __all__ = [
     "error",
     "field",
     "heading",
+    "item",
     "key_values",
     "line",
     "note",

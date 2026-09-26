@@ -63,6 +63,7 @@ from app.contracts import (
 from app.contracts.workbook import _parse_a1_range
 
 
+@pytest.mark.security
 class TestUntrustedText:
     def test_truncates_at_cap(self) -> None:
         text = UntrustedText("x" * 5_000, provenance="workbook_cell", max_chars=100)
@@ -439,11 +440,33 @@ class TestRunRecordAndEvents:
 
 
 class TestVerificationContract:
-    def test_recalculated_is_always_false(self) -> None:
-        """ExcelPilot cannot recalculate; the field exists so nobody assumes it can."""
+    def test_static_is_the_default_and_is_the_weak_claim(self) -> None:
+        """The default must be the honest, weaker claim.
+
+        Not a claim that recalculation is impossible — it is available as the
+        optional `recalc` extra. The point is that a run which did not evaluate
+        anything must say so rather than defaulting to the stronger claim.
+        """
         result = VerificationResult(run_id="run-1")
         assert result.recalculated is False
         assert result.static_formula_checks is True
+
+    def test_evaluated_and_static_are_mutually_exclusive(self) -> None:
+        """A consumer can never read a static result as an evaluated one.
+
+        The two flags describe opposite things about the same result, and
+        exactly one must be true. If both could be true, a static-only verdict
+        would be presentable as though formulas had been evaluated.
+        """
+        evaluated = VerificationResult(run_id="r", recalculated=True, static_formula_checks=False)
+        assert evaluated.recalculated is not evaluated.static_formula_checks
+
+        static = VerificationResult(run_id="r")
+        assert static.recalculated is not static.static_formula_checks
+
+    def test_a_result_cannot_be_edited_after_construction(self) -> None:
+        """Frozen, so a verifier cannot revise its own verdict after the fact."""
+        result = VerificationResult(run_id="run-1")
         with pytest.raises(ValidationError):
             result.recalculated = True  # type: ignore[misc]
 

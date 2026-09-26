@@ -1060,10 +1060,16 @@ def handle_reconcile(
     ExcelPilot never asks a model whether totals "look right". Every number here
     is computed in Python from the workbook's data cells.
 
-    When an aggregate is computed over *formula* cells, the values available are
-    whatever Excel last cached, and ExcelPilot cannot recalculate. That case is
-    reported as ``derived_from_formula_cells`` and downgraded to a warning rather
-    than being presented as a verified pass (ADR-0011).
+    When an aggregate is computed over *formula* cells, the values available
+    during execution are whatever Excel last cached, because execution operates
+    on an in-memory workbook and does not evaluate formulas. That case is reported
+    as ``derived_from_formula_cells`` and downgraded to a warning rather than
+    being presented as a verified pass (ADR-0011).
+
+    Evaluation is not skipped, it happens at a different point: the verifier
+    recalculates the saved output and reports the evaluated values separately, in
+    ``VerificationResult.recalculated``. Splitting the two keeps this report an
+    honest record of what execution could see.
     """
     results: list[ReconciliationResult] = []
     for spec in operation.checks:
